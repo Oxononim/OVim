@@ -159,6 +159,9 @@ ELEMENTS = [
 
 PAIRS = {'(': ')', '[': ']', '{': '}', '"': '"', "'": "'"}
 
+PL_RIGHT = ""   # U+E0B0
+PL_LEFT  = ""   # U+E0B2
+
 # ─── Git helpers ──────────────────────────────────────────────────────────────
 
 def git_run(args, cwd):
@@ -240,16 +243,12 @@ def git_checkout(cwd, branch):
         return str(e)
 
 def get_gutter_markers(filename):
-    """Returns dict of line_number -> '+' | '~' | '-'"""
     markers = {}
     if not filename or not os.path.exists(filename):
         return markers
     try:
         cwd = os.path.dirname(os.path.abspath(filename))
-        r = subprocess.run(
-            ['git', 'diff', '--unified=0', filename],
-            capture_output=True, cwd=cwd
-        )
+        r = subprocess.run(['git', 'diff', '--unified=0', filename], capture_output=True, cwd=cwd)
         output = r.stdout.decode(errors='replace')
         current_line = 0
         for line in output.splitlines():
@@ -258,14 +257,12 @@ def get_gutter_markers(filename):
                 current_line = int(m.group(1))
                 count = int(m.group(2)) if m.group(2) is not None else 1
                 if count == 0:
-                    # deletion — mark line before
                     markers[max(1, current_line)] = '-'
                 continue
             if line.startswith('+') and not line.startswith('+++'):
                 markers[current_line] = '+'
                 current_line += 1
             elif line.startswith('-') and not line.startswith('---'):
-                # modification or deletion
                 if current_line in markers and markers[current_line] == '+':
                     markers[current_line] = '~'
                 else:
@@ -675,9 +672,18 @@ def theme_builder(stdscr, tab_size, word_wrap):
                 if x < preview_w - 1:
                     stdscr.addstr(2 + i, x, text[:preview_w - x - 1], curses.color_pair(color))
                     x += len(text)
-        stdscr.addstr(height-1, 0, " -- NORMAL -- file.py", curses.color_pair(COLOR_STATUSBAR))
-        stdscr.addstr(height-1, 22, " main ", curses.color_pair(COLOR_GITBRANCH))
-        stdscr.addstr(height-1, 28, " python  42w ", curses.color_pair(COLOR_STATUSBAR))
+        # powerline statusbar preview
+        left_prev = " -- NORMAL -- file.py "
+        stdscr.addstr(height-1, 0, left_prev, curses.color_pair(COLOR_STATUSBAR))
+        px = len(left_prev)
+        stdscr.addstr(height-1, px, PL_RIGHT, curses.color_pair(COLOR_GITBRANCH))
+        px += 1
+        branch_prev = " main "
+        stdscr.addstr(height-1, px, branch_prev, curses.color_pair(COLOR_GITBRANCH))
+        px += len(branch_prev)
+        stdscr.addstr(height-1, px, PL_RIGHT, curses.color_pair(COLOR_STATUSBAR))
+        px += 1
+        stdscr.addstr(height-1, px, " python  42w ", curses.color_pair(COLOR_STATUSBAR))
         for i in range(1, height - 2):
             stdscr.addstr(i, preview_w, "│", curses.color_pair(COLOR_NORMAL))
         stdscr.addstr(1, preview_w + 1, " ELEMENTS".ljust(side_w), curses.color_pair(COLOR_STATUSBAR))
@@ -859,31 +865,48 @@ def draw_tabbar(stdscr, buffers, current, width):
         x += 1
 
 def draw_statusbar(stdscr, height, width, mode, buf, lang, col, offset, message, tab_size, branch, word_wrap, mark_line):
-    lines = buf["lines"]
-    row = buf["row"]
-    now = datetime.datetime.now().strftime("%a %d %b %H:%M")
-    words = sum(len(l.split()) for l in lines)
+    lines    = buf["lines"]
+    row      = buf["row"]
+    now      = datetime.datetime.now().strftime("%a %d %b %H:%M")
+    words    = sum(len(l.split()) for l in lines)
     filename = buf["filename"]
+
     if message:
-        left = f" {message}"
+        left = f" {message} "
     else:
-        left = f" -- {mode.upper()} -- {filename or '[No Name]'}"
+        left = f" -- {mode.upper()} -- {filename or '[No Name]'} "
         if mark_line is not None:
-            left += f"  [MARK:{mark_line+1}]"
-    right = f"{lang or 'plain'}  {words}w  tab:{tab_size}  {'wrap  ' if word_wrap else ''}ln {row+1}/{len(lines)}  col {col-offset+1}  {now} "
-    if branch:
-        branch_label = f" {branch} "
-        padding = max(0, width - 1 - len(left) - len(branch_label) - len(right))
-        stdscr.addstr(height-1, 0, left[:width-1], curses.color_pair(COLOR_STATUSBAR))
-        bx = len(left)
-        if bx < width - 1:
-            stdscr.addstr(height-1, bx, branch_label[:width-1-bx], curses.color_pair(COLOR_GITBRANCH))
-        rx = bx + len(branch_label)
-        if rx < width - 1:
-            stdscr.addstr(height-1, rx, (" " * padding + right)[:width-1-rx], curses.color_pair(COLOR_STATUSBAR))
-    else:
-        padding = max(0, width - len(left) - len(right))
-        stdscr.addstr(height-1, 0, (left + " " * padding + right)[:width-1], curses.color_pair(COLOR_STATUSBAR))
+            left += f"[MARK:{mark_line+1}] "
+
+    right = f" {lang or 'plain'}  {words}w  tab:{tab_size}  {'wrap  ' if word_wrap else ''}ln {row+1}/{len(lines)}  col {col-offset+1}  {now} "
+
+    try:
+        if branch:
+            branch_label = f" {branch} "
+            # draw left segment
+            stdscr.addstr(height-1, 0, left[:width-1], curses.color_pair(COLOR_STATUSBAR))
+            bx = len(left)
+            # powerline arrow: statusbar -> gitbranch
+            if bx < width - 1:
+                stdscr.addstr(height-1, bx, PL_RIGHT, curses.color_pair(COLOR_GITBRANCH))
+                bx += 1
+            # branch label
+            if bx < width - 1:
+                stdscr.addstr(height-1, bx, branch_label[:width-bx-1], curses.color_pair(COLOR_GITBRANCH))
+                bx += len(branch_label)
+            # powerline arrow: gitbranch -> statusbar
+            if bx < width - 1:
+                stdscr.addstr(height-1, bx, PL_RIGHT, curses.color_pair(COLOR_STATUSBAR))
+                bx += 1
+            # right segment
+            if bx < width - 1:
+                padding = max(0, width - bx - len(right) - 1)
+                stdscr.addstr(height-1, bx, (" " * padding + right)[:width-bx-1], curses.color_pair(COLOR_STATUSBAR))
+        else:
+            padding = max(0, width - len(left) - len(right))
+            stdscr.addstr(height-1, 0, (left + " " * padding + right)[:width-1], curses.color_pair(COLOR_STATUSBAR))
+    except:
+        pass
 
 def wrap_line(line, width, offset):
     text_width = width - offset
@@ -899,9 +922,9 @@ def draw_lines(stdscr, lines, scroll_top, text_height, offset, width, lang,
                search_pattern, show_numbers, word_wrap, mark_line, gutter_markers, scroll_left=0):
     total = len(lines)
     num_w = len(str(total))
-    screen_row = 1
 
     if word_wrap:
+        screen_row = 1
         for li in range(scroll_top, total):
             if screen_row >= text_height + 1:
                 break
@@ -1399,7 +1422,6 @@ def main(stdscr):
                         message = f"saved to {buf['filename']}"
                     else:
                         message = "no filename!"
-
                 elif command == "q":
                     if buf["modified"]:
                         message = "unsaved changes! use :q! to force or :wq to save"
@@ -1410,7 +1432,6 @@ def main(stdscr):
                         gutter_markers = get_gutter_markers(buffers[current_buf]["filename"])
                     else:
                         break
-
                 elif command == "q!":
                     if len(buffers) > 1:
                         buffers.pop(current_buf)
@@ -1419,7 +1440,6 @@ def main(stdscr):
                         gutter_markers = get_gutter_markers(buffers[current_buf]["filename"])
                     else:
                         break
-
                 elif command == "wq":
                     save(lines, buf["filename"])
                     buf["modified"] = False
@@ -1430,7 +1450,6 @@ def main(stdscr):
                         gutter_markers = get_gutter_markers(buffers[current_buf]["filename"])
                     else:
                         break
-
                 elif command.startswith("w "):
                     buf["filename"] = command[2:]
                     save(lines, buf["filename"])
@@ -1438,19 +1457,16 @@ def main(stdscr):
                     branch = get_git_branch(buf["filename"])
                     gutter_markers = get_gutter_markers(buf["filename"])
                     message = f"saved to {buf['filename']}"
-
                 elif command == "tabnew":
                     buffers.append(new_buffer())
                     current_buf = len(buffers) - 1
                     branch = get_git_branch(buffers[current_buf]["filename"])
                     gutter_markers = {}
-
                 elif command.startswith("tabnew "):
                     buffers.append(new_buffer(command[7:]))
                     current_buf = len(buffers) - 1
                     branch = get_git_branch(buffers[current_buf]["filename"])
                     gutter_markers = get_gutter_markers(buffers[current_buf]["filename"])
-
                 elif command.startswith("goto "):
                     try:
                         n = int(command[5:]) - 1
@@ -1461,37 +1477,29 @@ def main(stdscr):
                         buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
                     except ValueError:
                         message = "invalid line number"
-
                 elif command.startswith("set tabsize "):
                     try:
                         tab_size[0] = max(1, int(command[12:]))
                         message = f"tab size set to {tab_size[0]}"
                     except ValueError:
                         message = "invalid tab size"
-
                 elif command == "set wrap":
                     word_wrap[0] = True
                     message = "word wrap ON"
-
                 elif command == "set nowrap":
                     word_wrap[0] = False
                     buf["scroll_left"] = 0
                     message = "word wrap OFF"
-
-                # ── Git commands ──────────────────────────────────────────────
-
                 elif command == "gl":
                     git_tree(stdscr, cwd)
                     apply_theme(stdscr)
                     branch = get_git_branch(buf["filename"])
-
                 elif command == "gs":
                     if cwd:
                         out, err = git_run(['status'], cwd=cwd)
                         draw_scrollable(stdscr, (out or err).splitlines(), " GIT STATUS ")
                     else:
                         message = "not a git repo"
-
                 elif command == "gd":
                     if buf["filename"] and cwd:
                         out, err = git_run(['diff', buf["filename"]], cwd=cwd)
@@ -1501,7 +1509,6 @@ def main(stdscr):
                             message = "no changes to show"
                     else:
                         message = "no file open"
-
                 elif command == "ga":
                     if buf["filename"] and cwd:
                         out, err = git_run(['add', buf["filename"]], cwd=cwd)
@@ -1509,7 +1516,6 @@ def main(stdscr):
                         message = f"staged {os.path.basename(buf['filename'])}" if not err else err
                     else:
                         message = "no file open"
-
                 elif command == "gaa":
                     if cwd:
                         out, err = git_run(['add', '-A'], cwd=cwd)
@@ -1517,7 +1523,6 @@ def main(stdscr):
                         message = "staged all files" if not err else err
                     else:
                         message = "not a git repo"
-
                 elif command == "gun":
                     if buf["filename"] and cwd:
                         out, err = git_run(['restore', '--staged', buf["filename"]], cwd=cwd)
@@ -1525,7 +1530,6 @@ def main(stdscr):
                         message = f"unstaged {os.path.basename(buf['filename'])}" if not err else err
                     else:
                         message = "no file open"
-
                 elif command == "gc":
                     if cwd:
                         commit_msg = prompt_input(stdscr, " Commit message: ")
@@ -1538,7 +1542,6 @@ def main(stdscr):
                             message = "commit cancelled"
                     else:
                         message = "not a git repo"
-
                 elif command == "gca":
                     if cwd:
                         commit_msg = prompt_input(stdscr, " Commit message: ")
@@ -1552,7 +1555,6 @@ def main(stdscr):
                             message = "commit cancelled"
                     else:
                         message = "not a git repo"
-
                 elif command == "gp":
                     if cwd:
                         stdscr.addstr(height-1, 0, " pushing...".ljust(width-1), curses.color_pair(COLOR_STATUSBAR))
@@ -1561,14 +1563,12 @@ def main(stdscr):
                         git_result_popup(stdscr, " GIT PUSH ", out, err)
                     else:
                         message = "not a git repo"
-
                 elif command == "gpl":
                     if cwd:
                         stdscr.addstr(height-1, 0, " pulling...".ljust(width-1), curses.color_pair(COLOR_STATUSBAR))
                         stdscr.refresh()
                         out, err = git_run(['pull'], cwd=cwd)
                         git_result_popup(stdscr, " GIT PULL ", out, err)
-                        # reload file if it changed
                         if buf["filename"] and os.path.exists(buf["filename"]):
                             with open(buf["filename"], 'r') as f:
                                 content = f.read().splitlines()
@@ -1579,7 +1579,6 @@ def main(stdscr):
                         branch = get_git_branch(buf["filename"])
                     else:
                         message = "not a git repo"
-
                 elif command == "gf":
                     if cwd:
                         stdscr.addstr(height-1, 0, " fetching...".ljust(width-1), curses.color_pair(COLOR_STATUSBAR))
@@ -1588,7 +1587,6 @@ def main(stdscr):
                         git_result_popup(stdscr, " GIT FETCH ", out, err)
                     else:
                         message = "not a git repo"
-
                 elif command == "gb":
                     if cwd:
                         new_branch = prompt_input(stdscr, " New branch name: ")
@@ -1600,7 +1598,6 @@ def main(stdscr):
                             message = "cancelled"
                     else:
                         message = "not a git repo"
-
                 elif command == "gbd":
                     if cwd:
                         branches = get_git_branches(cwd)
@@ -1609,8 +1606,7 @@ def main(stdscr):
                             idx = draw_menu(stdscr, " DELETE BRANCH ", labels)
                             if idx is not None and idx < len(branches):
                                 bname = branches[idx][0]
-                                confirm = draw_menu(stdscr, " ARE YOU SURE? ", [f"Delete {bname}", "Cancel"])
-                                if confirm == 0:
+                                if draw_menu(stdscr, " ARE YOU SURE? ", [f"Delete {bname}", "Cancel"]) == 0:
                                     out, err = git_run(['branch', '-d', bname], cwd=cwd)
                                     git_result_popup(stdscr, " GIT BRANCH DELETE ", out, err)
                                     branch = get_git_branch(buf["filename"])
@@ -1618,7 +1614,6 @@ def main(stdscr):
                             message = "no branches found"
                     else:
                         message = "not a git repo"
-
                 elif command == "gsw":
                     if cwd:
                         branches = get_git_branches(cwd)
@@ -1641,7 +1636,6 @@ def main(stdscr):
                             message = "no branches found"
                     else:
                         message = "not a git repo"
-
                 elif command == "gst":
                     if cwd:
                         out, err = git_run(['stash'], cwd=cwd)
@@ -1655,7 +1649,6 @@ def main(stdscr):
                             buf["modified"] = False
                     else:
                         message = "not a git repo"
-
                 elif command == "gstp":
                     if cwd:
                         out, err = git_run(['stash', 'pop'], cwd=cwd)
@@ -1669,7 +1662,6 @@ def main(stdscr):
                             buf["modified"] = False
                     else:
                         message = "not a git repo"
-
                 elif command == "md":
                     if mark_line is None:
                         mark_line = row
@@ -1689,7 +1681,6 @@ def main(stdscr):
                         buf["modified"] = True
                         message = f"deleted lines {start+1} to {end+1}"
                         mark_line = None
-
                 else:
                     message = f"unknown command: {command}"
 
