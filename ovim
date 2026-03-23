@@ -761,20 +761,24 @@ def git_tree(stdscr, cwd):
 
 # ─── Fuzzy Finder ─────────────────────────────────────────────────────────────
 
+
 def fuzzy_find(stdscr, start_dir):
     stdscr.timeout(-1)
-    all_files = []
-    try:
-        for root, dirs, files in os.walk(start_dir):
-            dirs[:] = sorted([d for d in dirs if not d.startswith('.')])
-            for f in sorted(files):
-                if not f.startswith('.'):
-                    rel = os.path.relpath(os.path.join(root, f), start_dir)
-                    all_files.append(rel)
-    except:
-        pass
+    current_dir = start_dir
 
-    query = ""
+    def get_files(d):
+        files = [".."]
+        try:
+            entries = sorted(os.listdir(d))
+            dirs_  = [e + "/" for e in entries if os.path.isdir(os.path.join(d, e))]
+            files_ = [e for e in entries if os.path.isfile(os.path.join(d, e))]
+            files += dirs_ + files_
+        except:
+            pass
+        return files
+
+    all_files = get_files(current_dir)
+    query    = ""
     selected = 0
 
     while True:
@@ -793,9 +797,9 @@ def fuzzy_find(stdscr, start_dir):
             except:
                 pass
 
-        title = " FIND FILE "
+        title = f" FIND FILE — {os.path.relpath(current_dir, start_dir) or '.'} "
         try:
-            stdscr.addstr(y, x + (panel_w - len(title)) // 2, title,
+            stdscr.addstr(y, x + (panel_w - len(title)) // 2, title[:panel_w-1],
                           curses.color_pair(COLOR_STATUSBAR) | curses.A_BOLD)
         except:
             pass
@@ -810,8 +814,10 @@ def fuzzy_find(stdscr, start_dir):
             attr = curses.color_pair(COLOR_STATUSBAR) | curses.A_REVERSE if fi == selected \
                    else curses.color_pair(COLOR_STATUSBAR)
             try:
-                if query and query.lower() in f.lower():
-                    idx = f.lower().index(query.lower())
+                if f == "..":
+                    stdscr.addstr(y + 1 + i, x + 1, ".. (go up)"[:panel_w-2].ljust(panel_w-2), attr)
+                elif query and query.lower() in f.lower():
+                    idx    = f.lower().index(query.lower())
                     before = f[:idx]
                     match  = f[idx:idx+len(query)]
                     after  = f[idx+len(query):]
@@ -835,8 +841,9 @@ def fuzzy_find(stdscr, start_dir):
         except:
             pass
 
-        count_str = f" {len(filtered)} files "
-        hint = f" [Enter] open  [Tab] new tab  [Esc] cancel {count_str}"
+        dirs_count  = sum(1 for f in filtered if f.endswith("/"))
+        files_count = sum(1 for f in filtered if not f.endswith("/") and f != "..")
+        hint = f" [Enter] open  [Tab] new tab  [Bksp] up dir  [Esc] cancel   {dirs_count}  {files_count} "
         try:
             stdscr.addstr(y + panel_h - 1, x, hint[:panel_w].ljust(panel_w),
                           curses.color_pair(COLOR_STATUSBAR))
@@ -851,26 +858,44 @@ def fuzzy_find(stdscr, start_dir):
             return None, False
         elif key in (curses.KEY_ENTER, 10, 13):
             if filtered and selected < len(filtered):
-                stdscr.timeout(100)
-                return os.path.join(start_dir, filtered[selected]), False
-            stdscr.timeout(100)
-            return None, False
-        elif key == 9:
+                chosen = filtered[selected]
+                if chosen == "..":
+                    current_dir = os.path.dirname(current_dir)
+                    all_files   = get_files(current_dir)
+                    query       = ""
+                    selected    = 0
+                elif chosen.endswith("/"):
+                    current_dir = os.path.join(current_dir, chosen[:-1])
+                    all_files   = get_files(current_dir)
+                    query       = ""
+                    selected    = 0
+                else:
+                    stdscr.timeout(100)
+                    return os.path.join(current_dir, chosen), False
+        elif key == 9:  # Tab — open in new tab
             if filtered and selected < len(filtered):
-                stdscr.timeout(100)
-                return os.path.join(start_dir, filtered[selected]), True
-            stdscr.timeout(100)
-            return None, False
+                chosen = filtered[selected]
+                if not chosen.endswith("/") and chosen != "..":
+                    stdscr.timeout(100)
+                    return os.path.join(current_dir, chosen), True
         elif key == curses.KEY_UP and selected > 0:
             selected -= 1
         elif key == curses.KEY_DOWN and selected < len(filtered) - 1:
             selected += 1
         elif key in (curses.KEY_BACKSPACE, 127, 8):
-            query = query[:-1]
-            selected = 0
+            if query:
+                query    = query[:-1]
+                selected = 0
+            else:
+                current_dir = os.path.dirname(current_dir)
+                all_files   = get_files(current_dir)
+                selected    = 0
         elif 32 <= key <= 126:
-            query += chr(key)
+            query   += chr(key)
             selected = 0
+
+    stdscr.timeout(100)
+    return None, False
 
 # ─── Buffer ───────────────────────────────────────────────────────────────────
 
