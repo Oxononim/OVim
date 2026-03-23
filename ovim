@@ -32,6 +32,7 @@ COLOR_GUTTER_ADD = 20
 COLOR_GUTTER_MOD = 21
 COLOR_GUTTER_DEL = 22
 COLOR_PANEL      = 23
+COLOR_VISUAL     = 24
 
 COLOR_NAMES = [
     ("Default",  -1),
@@ -169,6 +170,7 @@ HELP_LINES = [
     "",
     "  ── MODES ──────────────────────────────────────────",
     "  i          enter insert mode",
+    "  v          enter visual mode",
     "  Escape     return to normal mode",
     "  :          enter command mode",
     "  /pattern   enter search mode",
@@ -189,6 +191,13 @@ HELP_LINES = [
     "  u          undo",
     "  Ctrl+R     redo",
     "  Tab        indent",
+    "",
+    "  ── VISUAL MODE ─────────────────────────────────────",
+    "  v          start visual selection",
+    "  j/k/↑/↓   expand selection",
+    "  y          yank selected lines",
+    "  d          delete selected lines",
+    "  Escape     cancel selection",
     "",
     "  ── SEARCH ──────────────────────────────────────────",
     "  /pattern   search for pattern",
@@ -242,12 +251,12 @@ HELP_LINES = [
 
 class RunPanel:
     def __init__(self):
-        self.output   = []
-        self.running  = False
-        self.proc     = None
-        self.thread   = None
-        self.scroll   = 0
-        self.lock     = threading.Lock()
+        self.output  = []
+        self.running = False
+        self.proc    = None
+        self.thread  = None
+        self.scroll  = 0
+        self.lock    = threading.Lock()
 
     def start(self, filename, lang):
         self.stop()
@@ -255,7 +264,6 @@ class RunPanel:
             self.output = []
             self.scroll = 0
         self.running = True
-
         if lang == "python":
             cmd = ["python3", filename]
         elif lang == "bash":
@@ -268,19 +276,14 @@ class RunPanel:
 
         def run():
             try:
-                self.proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1
-                )
+                self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                             stderr=subprocess.STDOUT, text=True, bufsize=1)
                 for line in self.proc.stdout:
                     with self.lock:
                         self.output.append(line.rstrip())
                 self.proc.wait()
                 with self.lock:
-                    self.output.append(f"")
+                    self.output.append("")
                     self.output.append(f"  [process exited with code {self.proc.returncode}]")
             except Exception as e:
                 with self.lock:
@@ -305,25 +308,20 @@ class RunPanel:
             return list(self.output)
 
     def draw(self, stdscr, top, height, width):
-        # panel title bar
         status = " RUNNING..." if self.running else " DONE "
-        title = f" OUTPUT {status}"
-        hint  = " [:run close] close  [Ctrl+C] kill "
+        title  = f" OUTPUT {status}"
+        hint   = " [:run close] close  [Ctrl+C] kill "
         padding = max(0, width - len(title) - len(hint))
         bar = title + " " * padding + hint
         try:
             stdscr.addstr(top, 0, bar[:width-1], curses.color_pair(COLOR_PANEL) | curses.A_BOLD)
         except:
             pass
-
-        # output lines
         lines = self.get_output()
-        # auto scroll to bottom if running
         if self.running:
             self.scroll = max(0, len(lines) - (height - 1))
         visible = lines[self.scroll:self.scroll + height - 1]
         for i, line in enumerate(visible):
-            # color error lines red
             if any(w in line.lower() for w in ('error', 'traceback', 'exception')):
                 color = curses.color_pair(COLOR_DIFF_DEL)
             elif any(w in line.lower() for w in ('warning', 'warn')):
@@ -350,11 +348,8 @@ def get_git_root(filename):
     if not filename:
         return None
     try:
-        r = subprocess.run(
-            ['git', 'rev-parse', '--show-toplevel'],
-            capture_output=True,
-            cwd=os.path.dirname(os.path.abspath(filename))
-        )
+        r = subprocess.run(['git', 'rev-parse', '--show-toplevel'], capture_output=True,
+                           cwd=os.path.dirname(os.path.abspath(filename)))
         out = r.stdout.decode().strip()
         return out if out else None
     except:
@@ -381,14 +376,14 @@ def get_git_log(cwd):
             fields = rest.split('\x1f')
             if len(fields) >= 5:
                 h, refs, msg, author, date = fields[:5]
-                entries.append({
-                    'graph': graph_part, 'hash': h[:7], 'fullhash': h,
-                    'refs': refs, 'msg': msg, 'author': author, 'date': date,
-                })
+                entries.append({'graph': graph_part, 'hash': h[:7], 'fullhash': h,
+                                 'refs': refs, 'msg': msg, 'author': author, 'date': date})
             else:
-                entries.append({'graph': graph_part, 'hash': '', 'fullhash': '', 'refs': '', 'msg': '', 'author': '', 'date': ''})
+                entries.append({'graph': graph_part, 'hash': '', 'fullhash': '',
+                                 'refs': '', 'msg': '', 'author': '', 'date': ''})
         else:
-            entries.append({'graph': line, 'hash': '', 'fullhash': '', 'refs': '', 'msg': '', 'author': '', 'date': ''})
+            entries.append({'graph': line, 'hash': '', 'fullhash': '',
+                             'refs': '', 'msg': '', 'author': '', 'date': ''})
     return entries
 
 def get_commit_diff(cwd, fullhash):
@@ -438,10 +433,7 @@ def get_gutter_markers(filename):
                 markers[current_line] = '+'
                 current_line += 1
             elif line.startswith('-') and not line.startswith('---'):
-                if current_line in markers and markers[current_line] == '+':
-                    markers[current_line] = '~'
-                else:
-                    markers[current_line] = '~'
+                markers[current_line] = '~'
             elif not line.startswith('\\'):
                 if not line.startswith('-') and not line.startswith('+'):
                     current_line += 1
@@ -579,14 +571,16 @@ def git_tree(stdscr, cwd):
         stdscr.clear()
         height, width = stdscr.getmaxyx()
         text_height = height - 2
-        stdscr.addstr(0, 0, " GIT TREE ".center(width)[:width-1], curses.color_pair(COLOR_STATUSBAR) | curses.A_BOLD)
+        stdscr.addstr(0, 0, " GIT TREE ".center(width)[:width-1],
+                      curses.color_pair(COLOR_STATUSBAR) | curses.A_BOLD)
         for i in range(text_height):
             ei = scroll + i
             if ei >= len(entries):
                 break
             e = entries[ei]
             is_sel = ei in commit_indices and commit_indices.index(ei) == selected_commit
-            draw_graph_line(stdscr, i+1, e['graph'], e['hash'], e['refs'], e['msg'], e['author'], e['date'], is_sel, width)
+            draw_graph_line(stdscr, i+1, e['graph'], e['hash'], e['refs'],
+                            e['msg'], e['author'], e['date'], is_sel, width)
         sel = entries[commit_indices[selected_commit]]
         bottom = f" [{sel['hash']}] {sel['msg'][:35]}  [Enter] diff  [b] branches  [c] checkout  [q] quit "
         stdscr.addstr(height-1, 0, bottom[:width-1], curses.color_pair(COLOR_STATUSBAR))
@@ -606,10 +600,12 @@ def git_tree(stdscr, cwd):
                 scroll = sel_line - text_height + 1
         elif key in (curses.KEY_ENTER, 10, 13):
             if sel['fullhash']:
-                want_full = draw_scrollable(stdscr, get_commit_diff(cwd, sel['fullhash']).splitlines(),
+                want_full = draw_scrollable(stdscr,
+                    get_commit_diff(cwd, sel['fullhash']).splitlines(),
                     f" COMMIT {sel['hash']} — {sel['msg'][:50]} ", "[Enter] full diff  ")
                 if want_full:
-                    draw_scrollable(stdscr, get_commit_full_diff(cwd, sel['fullhash']).splitlines(),
+                    draw_scrollable(stdscr,
+                        get_commit_full_diff(cwd, sel['fullhash']).splitlines(),
                         f" FULL DIFF {sel['hash']} ")
         elif key == ord('b'):
             branches = get_git_branches(cwd)
@@ -682,6 +678,7 @@ def apply_theme(stdscr=None):
     curses.init_pair(COLOR_GUTTER_MOD, curses.COLOR_YELLOW,  -1)
     curses.init_pair(COLOR_GUTTER_DEL, curses.COLOR_RED,     -1)
     curses.init_pair(COLOR_PANEL,      curses.COLOR_BLACK,   curses.COLOR_CYAN)
+    curses.init_pair(COLOR_VISUAL,     curses.COLOR_BLACK,   curses.COLOR_CYAN)
     if stdscr:
         stdscr.bkgd(' ', curses.color_pair(COLOR_BACKGROUND))
 
@@ -689,7 +686,8 @@ def save_theme_to_file(name, tab_size, word_wrap):
     os.makedirs(THEME_DIR, exist_ok=True)
     data = {"tab_size": tab_size[0], "word_wrap": word_wrap[0]}
     for key, (pair, fg, bg) in theme.items():
-        data[key] = {"pair": pair, "fg": COLOR_ID_TO_NAME.get(fg, "Default"), "bg": COLOR_ID_TO_NAME.get(bg, "Default")}
+        data[key] = {"pair": pair, "fg": COLOR_ID_TO_NAME.get(fg, "Default"),
+                     "bg": COLOR_ID_TO_NAME.get(bg, "Default")}
     path = os.path.join(THEME_DIR, f"{name}.json")
     with open(path, 'w') as f:
         json.dump(data, f, indent=2)
@@ -708,7 +706,8 @@ def load_theme_from_file(name, tab_size, word_wrap):
         word_wrap[0] = data["word_wrap"]
     for key, val in data.items():
         if key in theme and isinstance(val, dict):
-            theme[key] = (val["pair"], name_to_id.get(val["fg"], -1), name_to_id.get(val["bg"], -1))
+            theme[key] = (val["pair"], name_to_id.get(val["fg"], -1),
+                          name_to_id.get(val["bg"], -1))
     return True
 
 def list_saved_themes():
@@ -819,17 +818,21 @@ def draw_color_picker(stdscr, title):
         return None
     return COLOR_NAMES[idx][1]
 
+
 def prompt_input(stdscr, prompt):
     height, width = stdscr.getmaxyx()
-    stdscr.addstr(height-1, 0, prompt.ljust(width-1), curses.color_pair(COLOR_STATUSBAR))
-    curses.echo()
+    stdscr.timeout(-1)  # disable timeout while typing
     curses.curs_set(1)
+    stdscr.addstr(height-1, 0, prompt.ljust(width-1), curses.color_pair(COLOR_STATUSBAR))
+    stdscr.refresh()
+    curses.echo()
     stdscr.move(height-1, len(prompt))
     try:
         val = stdscr.getstr(height-1, len(prompt), 80).decode()
     except:
         val = ""
     curses.noecho()
+    stdscr.timeout(100)  # restore timeout
     return val
 
 def theme_builder(stdscr, tab_size, word_wrap):
@@ -840,7 +843,8 @@ def theme_builder(stdscr, tab_size, word_wrap):
         height, width = stdscr.getmaxyx()
         preview_w = width // 2
         side_w = width - preview_w - 1
-        stdscr.addstr(0, 0, " THEME BUILDER ".center(width), curses.color_pair(COLOR_STATUSBAR) | curses.A_BOLD)
+        stdscr.addstr(0, 0, " THEME BUILDER ".center(width),
+                      curses.color_pair(COLOR_STATUSBAR) | curses.A_BOLD)
         stdscr.addstr(1, 0, " PREVIEW".ljust(preview_w), curses.color_pair(COLOR_STATUSBAR))
         for i, line in enumerate(PREVIEW_CODE):
             x = 1
@@ -853,9 +857,8 @@ def theme_builder(stdscr, tab_size, word_wrap):
         px = len(left_prev)
         stdscr.addstr(height-1, px, PL_RIGHT, curses.color_pair(COLOR_GITBRANCH))
         px += 1
-        branch_prev = " main "
-        stdscr.addstr(height-1, px, branch_prev, curses.color_pair(COLOR_GITBRANCH))
-        px += len(branch_prev)
+        stdscr.addstr(height-1, px, " main ", curses.color_pair(COLOR_GITBRANCH))
+        px += 6
         stdscr.addstr(height-1, px, PL_RIGHT, curses.color_pair(COLOR_STATUSBAR))
         px += 1
         stdscr.addstr(height-1, px, " python  42w ", curses.color_pair(COLOR_STATUSBAR))
@@ -870,7 +873,8 @@ def theme_builder(stdscr, tab_size, word_wrap):
                 pair, fg, bg = theme[key]
                 entry = f" {label}: {COLOR_ID_TO_NAME.get(fg,'Default')}/{COLOR_ID_TO_NAME.get(bg,'Default')}"
                 color = pair
-            attr = curses.color_pair(COLOR_STATUSBAR) | curses.A_REVERSE if i == selected else curses.color_pair(color)
+            attr = curses.color_pair(COLOR_STATUSBAR) | curses.A_REVERSE if i == selected \
+                   else curses.color_pair(color)
             stdscr.addstr(2 + i, preview_w + 1, entry.ljust(side_w), attr)
         bottom = " [Enter] Edit/Toggle  [S] Save  [L] Load  [D] Delete  [T] Tab size  [Q] Done"
         if message:
@@ -996,7 +1000,8 @@ def copy_to_clipboard(text):
 
 def paste_from_clipboard():
     try:
-        return subprocess.run(['wl-paste', '--no-newline'], capture_output=True).stdout.decode()
+        return subprocess.run(['wl-paste', '--no-newline'],
+                              capture_output=True).stdout.decode()
     except:
         return ""
 
@@ -1039,19 +1044,26 @@ def draw_tabbar(stdscr, buffers, current, width):
         stdscr.addstr(0, x, "│", curses.color_pair(COLOR_NORMAL))
         x += 1
 
-def draw_statusbar(stdscr, height, width, mode, buf, lang, col, offset, message, tab_size, branch, word_wrap, mark_line):
+def draw_statusbar(stdscr, height, width, mode, buf, lang, col, offset,
+                   message, tab_size, branch, word_wrap, mark_line, visual_start, row):
     lines    = buf["lines"]
-    row      = buf["row"]
     now      = datetime.datetime.now().strftime("%a %d %b %H:%M")
     words    = sum(len(l.split()) for l in lines)
     filename = buf["filename"]
+
     if message:
         left = f" {message} "
     else:
         left = f" -- {mode.upper()} -- {filename or '[No Name]'} "
         if mark_line is not None:
             left += f"[MARK:{mark_line+1}] "
+        if mode == "visual" and visual_start is not None:
+            sel_top = min(visual_start, row)
+            sel_bot = max(visual_start, row)
+            left += f"[{sel_bot - sel_top + 1} lines] "
+
     right = f" {lang or 'plain'}  {words}w  tab:{tab_size}  {'wrap  ' if word_wrap else ''}ln {row+1}/{len(lines)}  col {col-offset+1}  {now} "
+
     try:
         if branch:
             branch_label = f" {branch} "
@@ -1061,17 +1073,20 @@ def draw_statusbar(stdscr, height, width, mode, buf, lang, col, offset, message,
                 stdscr.addstr(height-1, bx, PL_RIGHT, curses.color_pair(COLOR_GITBRANCH))
                 bx += 1
             if bx < width - 1:
-                stdscr.addstr(height-1, bx, branch_label[:width-bx-1], curses.color_pair(COLOR_GITBRANCH))
+                stdscr.addstr(height-1, bx, branch_label[:width-bx-1],
+                              curses.color_pair(COLOR_GITBRANCH))
                 bx += len(branch_label)
             if bx < width - 1:
                 stdscr.addstr(height-1, bx, PL_RIGHT, curses.color_pair(COLOR_STATUSBAR))
                 bx += 1
             if bx < width - 1:
                 padding = max(0, width - bx - len(right) - 1)
-                stdscr.addstr(height-1, bx, (" " * padding + right)[:width-bx-1], curses.color_pair(COLOR_STATUSBAR))
+                stdscr.addstr(height-1, bx, (" " * padding + right)[:width-bx-1],
+                              curses.color_pair(COLOR_STATUSBAR))
         else:
             padding = max(0, width - len(left) - len(right))
-            stdscr.addstr(height-1, 0, (left + " " * padding + right)[:width-1], curses.color_pair(COLOR_STATUSBAR))
+            stdscr.addstr(height-1, 0, (left + " " * padding + right)[:width-1],
+                          curses.color_pair(COLOR_STATUSBAR))
     except:
         pass
 
@@ -1086,9 +1101,18 @@ def wrap_line(line, width, offset):
     return chunks
 
 def draw_lines(stdscr, lines, scroll_top, text_height, offset, width, lang,
-               search_pattern, show_numbers, word_wrap, mark_line, gutter_markers, scroll_left=0):
+               search_pattern, show_numbers, word_wrap, mark_line, gutter_markers,
+               visual_start, visual_end, scroll_left=0):
     total = len(lines)
     num_w = len(str(total))
+
+    # compute visual selection range
+    if visual_start is not None and visual_end is not None:
+        sel_top = min(visual_start, visual_end)
+        sel_bot = max(visual_start, visual_end)
+    else:
+        sel_top = sel_bot = -1
+
     if word_wrap:
         screen_row = 1
         for li in range(scroll_top, total):
@@ -1106,17 +1130,27 @@ def draw_lines(stdscr, lines, scroll_top, text_height, offset, width, lang,
                             nc = COLOR_MARK
                         elif (li + 1) in gutter_markers:
                             m = gutter_markers[li + 1]
-                            nc = COLOR_GUTTER_ADD if m == '+' else COLOR_GUTTER_MOD if m == '~' else COLOR_GUTTER_DEL
+                            nc = COLOR_GUTTER_ADD if m == '+' else \
+                                 COLOR_GUTTER_MOD if m == '~' else COLOR_GUTTER_DEL
                         else:
                             nc = COLOR_LINENR
                         stdscr.addstr(screen_row, 0, num, curses.color_pair(nc))
                     else:
-                        stdscr.addstr(screen_row, 0, " " * offset, curses.color_pair(COLOR_LINENR))
+                        stdscr.addstr(screen_row, 0, " " * offset,
+                                      curses.color_pair(COLOR_LINENR))
                     x = offset
-                for text, color in highlight_line(chunk, lang, search_pattern or None):
-                    if x < width:
-                        stdscr.addstr(screen_row, x, text[:width - x], curses.color_pair(color))
-                        x += len(text)
+                if sel_top <= li <= sel_bot:
+                    try:
+                        stdscr.addstr(screen_row, x, chunk[:width-x],
+                                      curses.color_pair(COLOR_VISUAL))
+                    except:
+                        pass
+                else:
+                    for text, color in highlight_line(chunk, lang, search_pattern or None):
+                        if x < width:
+                            stdscr.addstr(screen_row, x, text[:width - x],
+                                          curses.color_pair(color))
+                            x += len(text)
                 screen_row += 1
         while screen_row <= text_height:
             stdscr.addstr(screen_row, 0, "~", curses.color_pair(COLOR_TILDE))
@@ -1132,16 +1166,25 @@ def draw_lines(stdscr, lines, scroll_top, text_height, offset, width, lang,
                     nc = COLOR_MARK
                 elif (li + 1) in gutter_markers:
                     m = gutter_markers[li + 1]
-                    nc = COLOR_GUTTER_ADD if m == '+' else COLOR_GUTTER_MOD if m == '~' else COLOR_GUTTER_DEL
+                    nc = COLOR_GUTTER_ADD if m == '+' else \
+                         COLOR_GUTTER_MOD if m == '~' else COLOR_GUTTER_DEL
                 else:
                     nc = COLOR_LINENR
                 stdscr.addstr(i + 1, 0, num, curses.color_pair(nc))
                 x = offset
-            display = line[scroll_left:] if scroll_left < len(line) else ""
-            for text, color in highlight_line(display, lang, search_pattern or None):
-                if x < width:
-                    stdscr.addstr(i + 1, x, text[:width - x], curses.color_pair(color))
-                    x += len(text)
+            if sel_top <= li <= sel_bot:
+                display = line[scroll_left:] if scroll_left < len(line) else ""
+                try:
+                    stdscr.addstr(i + 1, x, display[:width-x],
+                                  curses.color_pair(COLOR_VISUAL))
+                except:
+                    pass
+            else:
+                display = line[scroll_left:] if scroll_left < len(line) else ""
+                for text, color in highlight_line(display, lang, search_pattern or None):
+                    if x < width:
+                        stdscr.addstr(i + 1, x, text[:width - x], curses.color_pair(color))
+                        x += len(text)
         for i in range(len(visible), text_height):
             stdscr.addstr(i + 1, 0, "~", curses.color_pair(COLOR_TILDE))
 
@@ -1187,6 +1230,7 @@ def main(stdscr):
     panel          = RunPanel()
     panel_height   = 10
     panel_open     = False
+    visual_start   = None
 
     if len(sys.argv) > 1:
         buffers = [new_buffer(sys.argv[1])]
@@ -1196,7 +1240,6 @@ def main(stdscr):
     branch = get_git_branch(buffers[current_buf]["filename"])
     gutter_markers = get_gutter_markers(buffers[current_buf]["filename"])
 
-    # set timeout so panel updates while running
     stdscr.timeout(100)
 
     while True:
@@ -1227,35 +1270,36 @@ def main(stdscr):
 
         draw_tabbar(stdscr, buffers, current_buf, width)
 
-        # calculate heights
         if panel_open:
-            text_height = height - 2 - panel_height - 1
+            text_height = max(3, height - 2 - panel_height - 1)
         else:
             text_height = height - 2
 
-        text_height = max(3, text_height)
-
         draw_lines(stdscr, lines, scroll_top, text_height, offset, width, lang,
-                   search_pattern, show_numbers, word_wrap[0], mark_line, gutter_markers, scroll_left)
+                   search_pattern, show_numbers, word_wrap[0], mark_line, gutter_markers,
+                   visual_start, row if mode == "visual" else None, scroll_left)
 
-        # draw panel
         if panel_open:
-            panel_top = text_height + 1
-            panel.draw(stdscr, panel_top, panel_height, width)
+            panel.draw(stdscr, text_height + 1, panel_height, width)
 
         if word_wrap[0]:
-            cursor_screen_row, cursor_screen_col = get_cursor_screen_row(lines, row, col, offset, width, scroll_top)
+            cursor_screen_row, cursor_screen_col = get_cursor_screen_row(
+                lines, row, col, offset, width, scroll_top)
             cursor_screen_row = min(cursor_screen_row, text_height)
         else:
             cursor_screen_row = row - scroll_top + 1
             cursor_screen_col = col - scroll_left
 
         if mode == "command":
-            stdscr.addstr(height-1, 0, f":{command}    ", curses.color_pair(COLOR_STATUSBAR))
+            stdscr.addstr(height-1, 0, f":{command}    ",
+                          curses.color_pair(COLOR_STATUSBAR))
         elif mode == "search":
-            stdscr.addstr(height-1, 0, f"/{search_pattern}    ", curses.color_pair(COLOR_STATUSBAR))
+            stdscr.addstr(height-1, 0, f"/{search_pattern}    ",
+                          curses.color_pair(COLOR_STATUSBAR))
         else:
-            draw_statusbar(stdscr, height, width, mode, buf, lang, col, offset, message, tab_size[0], branch, word_wrap[0], mark_line)
+            draw_statusbar(stdscr, height, width, mode, buf, lang, col, offset,
+                           message, tab_size[0], branch, word_wrap[0], mark_line,
+                           visual_start, row)
 
         try:
             stdscr.move(cursor_screen_row, max(0, cursor_screen_col))
@@ -1292,7 +1336,6 @@ def main(stdscr):
                 search_pattern += chr(key)
             continue
 
-        # Ctrl+C to kill running process
         if key == 3 and panel_open and panel.running:
             panel.stop()
             message = "process killed"
@@ -1350,9 +1393,68 @@ def main(stdscr):
                 buf["scroll_left"] = scroll_left + 1
             buf["col"] = col
 
+        elif mode == "visual":
+            if key == 27:
+                mode = "normal"
+                visual_start = None
+            elif key in (ord('j'), curses.KEY_DOWN) and row < len(lines) - 1:
+                row += 1
+                buf["row"] = row
+                buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
+            elif key in (ord('k'), curses.KEY_UP) and row > 0:
+                row -= 1
+                buf["row"] = row
+                buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
+            elif key == ord('y') or key == ord('Y'):
+                sel_top = min(visual_start, row)
+                sel_bot = max(visual_start, row)
+                yank_buffer = '\n'.join(lines[sel_top:sel_bot+1])
+                copy_to_clipboard(yank_buffer)
+                message = f"yanked {sel_bot - sel_top + 1} lines"
+                mode = "normal"
+                visual_start = None
+            elif key == ord('d'):
+                sel_top = min(visual_start, row)
+                sel_bot = max(visual_start, row)
+                push_undo(buf)
+                del lines[sel_top:sel_bot+1]
+                if not lines:
+                    buf["lines"] = [""]
+                row = max(0, sel_top)
+                col = offset
+                buf["row"] = row
+                buf["col"] = col
+                buf["modified"] = True
+                buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
+                message = f"deleted {sel_bot - sel_top + 1} lines"
+                mode = "normal"
+                visual_start = None
+            elif key == ord('>'):
+                # indent selection
+                sel_top = min(visual_start, row)
+                sel_bot = max(visual_start, row)
+                push_undo(buf)
+                for li in range(sel_top, sel_bot + 1):
+                    lines[li] = " " * tab_size[0] + lines[li]
+                buf["modified"] = True
+                message = f"indented {sel_bot - sel_top + 1} lines"
+            elif key == ord('<'):
+                # dedent selection
+                sel_top = min(visual_start, row)
+                sel_bot = max(visual_start, row)
+                push_undo(buf)
+                for li in range(sel_top, sel_bot + 1):
+                    lines[li] = lines[li][tab_size[0]:] if lines[li].startswith(" " * tab_size[0]) \
+                                 else lines[li].lstrip()
+                buf["modified"] = True
+                message = f"dedented {sel_bot - sel_top + 1} lines"
+
         elif mode == "normal":
             if key == ord(' '):
                 open_theme_menu(stdscr, tab_size, word_wrap)
+            elif key == ord('v'):
+                visual_start = row
+                mode = "visual"
             elif key == ord('/'):
                 mode = "search"
                 search_pattern = ""
@@ -1543,6 +1645,7 @@ def main(stdscr):
                 g_pending = False
                 z_pending = False
                 mark_line = None
+                visual_start = None
                 search_pattern = ""
                 search_matches = []
 
@@ -1711,7 +1814,8 @@ def main(stdscr):
                     if buf["filename"] and cwd:
                         out, err = git_run(['diff', buf["filename"]], cwd=cwd)
                         if out:
-                            draw_scrollable(stdscr, out.splitlines(), f" GIT DIFF — {os.path.basename(buf['filename'])} ")
+                            draw_scrollable(stdscr, out.splitlines(),
+                                f" GIT DIFF — {os.path.basename(buf['filename'])} ")
                         else:
                             message = "no changes to show"
                     else:
@@ -1764,7 +1868,8 @@ def main(stdscr):
                         message = "not a git repo"
                 elif command == "gp":
                     if cwd:
-                        stdscr.addstr(height-1, 0, " pushing...".ljust(width-1), curses.color_pair(COLOR_STATUSBAR))
+                        stdscr.addstr(height-1, 0, " pushing...".ljust(width-1),
+                                      curses.color_pair(COLOR_STATUSBAR))
                         stdscr.refresh()
                         out, err = git_run(['push'], cwd=cwd)
                         git_result_popup(stdscr, " GIT PUSH ", out, err)
@@ -1772,7 +1877,8 @@ def main(stdscr):
                         message = "not a git repo"
                 elif command == "gpl":
                     if cwd:
-                        stdscr.addstr(height-1, 0, " pulling...".ljust(width-1), curses.color_pair(COLOR_STATUSBAR))
+                        stdscr.addstr(height-1, 0, " pulling...".ljust(width-1),
+                                      curses.color_pair(COLOR_STATUSBAR))
                         stdscr.refresh()
                         out, err = git_run(['pull'], cwd=cwd)
                         git_result_popup(stdscr, " GIT PULL ", out, err)
@@ -1788,7 +1894,8 @@ def main(stdscr):
                         message = "not a git repo"
                 elif command == "gf":
                     if cwd:
-                        stdscr.addstr(height-1, 0, " fetching...".ljust(width-1), curses.color_pair(COLOR_STATUSBAR))
+                        stdscr.addstr(height-1, 0, " fetching...".ljust(width-1),
+                                      curses.color_pair(COLOR_STATUSBAR))
                         stdscr.refresh()
                         out, err = git_run(['fetch'], cwd=cwd)
                         git_result_popup(stdscr, " GIT FETCH ", out, err)
@@ -1813,7 +1920,8 @@ def main(stdscr):
                             idx = draw_menu(stdscr, " DELETE BRANCH ", labels)
                             if idx is not None and idx < len(branches):
                                 bname = branches[idx][0]
-                                if draw_menu(stdscr, " ARE YOU SURE? ", [f"Delete {bname}", "Cancel"]) == 0:
+                                if draw_menu(stdscr, " ARE YOU SURE? ",
+                                             [f"Delete {bname}", "Cancel"]) == 0:
                                     out, err = git_run(['branch', '-d', bname], cwd=cwd)
                                     git_result_popup(stdscr, " GIT BRANCH DELETE ", out, err)
                                     branch = get_git_branch(buf["filename"])
