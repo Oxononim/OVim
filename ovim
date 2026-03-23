@@ -6,6 +6,7 @@ import re
 import subprocess
 import datetime
 import json
+import threading
 
 # Color pair numbers
 COLOR_LINENR     = 1
@@ -30,6 +31,7 @@ COLOR_MARK       = 19
 COLOR_GUTTER_ADD = 20
 COLOR_GUTTER_MOD = 21
 COLOR_GUTTER_DEL = 22
+COLOR_PANEL      = 23
 
 COLOR_NAMES = [
     ("Default",  -1),
@@ -159,8 +161,181 @@ ELEMENTS = [
 
 PAIRS = {'(': ')', '[': ']', '{': '}', '"': '"', "'": "'"}
 
-PL_RIGHT = ""   # U+E0B0
-PL_LEFT  = ""   # U+E0B2
+PL_RIGHT = ""
+PL_LEFT  = ""
+
+HELP_LINES = [
+    "  OVIM HELP",
+    "",
+    "  ── MODES ──────────────────────────────────────────",
+    "  i          enter insert mode",
+    "  Escape     return to normal mode",
+    "  :          enter command mode",
+    "  /pattern   enter search mode",
+    "",
+    "  ── NAVIGATION ──────────────────────────────────────",
+    "  h j k l    left / down / up / right",
+    "  Arrow keys move cursor (all modes)",
+    "  gg         jump to top",
+    "  G          jump to bottom",
+    "  zh / zl    scroll left / right",
+    "",
+    "  ── EDITING ─────────────────────────────────────────",
+    "  o          new line below + insert",
+    "  x          delete character under cursor",
+    "  dd         delete line",
+    "  yy         yank line",
+    "  p / P      paste below / above",
+    "  u          undo",
+    "  Ctrl+R     redo",
+    "  Tab        indent",
+    "",
+    "  ── SEARCH ──────────────────────────────────────────",
+    "  /pattern   search for pattern",
+    "  n / N      next / previous match",
+    "",
+    "  ── COMMANDS ────────────────────────────────────────",
+    "  :w         save",
+    "  :w file    save as",
+    "  :q         quit",
+    "  :q!        force quit",
+    "  :wq        save and quit",
+    "  :tabnew    new tab",
+    "  :tabnew f  open file in new tab",
+    "  :goto N    jump to line N",
+    "  :set tabsize N  set tab size",
+    "  :set wrap  enable word wrap",
+    "  :set nowrap disable word wrap",
+    "  :md        mass delete marker (run twice)",
+    "  :run       run current file",
+    "  :run close close output panel",
+    "",
+    "  ── TAB NAVIGATION ──────────────────────────────────",
+    "  t / T      next / previous tab",
+    "",
+    "  ── GIT ─────────────────────────────────────────────",
+    "  :gl        git tree viewer",
+    "  :gs        git status",
+    "  :gd        git diff current file",
+    "  :ga        stage current file",
+    "  :gaa       stage all files",
+    "  :gun       unstage current file",
+    "  :gc        commit with message",
+    "  :gca       stage all + commit",
+    "  :gp        push",
+    "  :gpl       pull",
+    "  :gf        fetch",
+    "  :gb        create new branch",
+    "  :gbd       delete a branch",
+    "  :gsw       switch branch",
+    "  :gst       stash",
+    "  :gstp      stash pop",
+    "",
+    "  ── THEME ───────────────────────────────────────────",
+    "  Space      open theme menu",
+    "  n          toggle line numbers",
+    "",
+    "  :h         show this help screen",
+]
+
+# ─── Run panel ────────────────────────────────────────────────────────────────
+
+class RunPanel:
+    def __init__(self):
+        self.output   = []
+        self.running  = False
+        self.proc     = None
+        self.thread   = None
+        self.scroll   = 0
+        self.lock     = threading.Lock()
+
+    def start(self, filename, lang):
+        self.stop()
+        with self.lock:
+            self.output = []
+            self.scroll = 0
+        self.running = True
+
+        if lang == "python":
+            cmd = ["python3", filename]
+        elif lang == "bash":
+            cmd = ["/bin/bash", filename]
+        else:
+            with self.lock:
+                self.output.append(f"don't know how to run: {filename}")
+            self.running = False
+            return
+
+        def run():
+            try:
+                self.proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1
+                )
+                for line in self.proc.stdout:
+                    with self.lock:
+                        self.output.append(line.rstrip())
+                self.proc.wait()
+                with self.lock:
+                    self.output.append(f"")
+                    self.output.append(f"  [process exited with code {self.proc.returncode}]")
+            except Exception as e:
+                with self.lock:
+                    self.output.append(f"error: {e}")
+            finally:
+                self.running = False
+
+        self.thread = threading.Thread(target=run, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        if self.proc:
+            try:
+                self.proc.terminate()
+                self.proc = None
+            except:
+                pass
+        self.running = False
+
+    def get_output(self):
+        with self.lock:
+            return list(self.output)
+
+    def draw(self, stdscr, top, height, width):
+        # panel title bar
+        status = " RUNNING..." if self.running else " DONE "
+        title = f" OUTPUT {status}"
+        hint  = " [:run close] close  [Ctrl+C] kill "
+        padding = max(0, width - len(title) - len(hint))
+        bar = title + " " * padding + hint
+        try:
+            stdscr.addstr(top, 0, bar[:width-1], curses.color_pair(COLOR_PANEL) | curses.A_BOLD)
+        except:
+            pass
+
+        # output lines
+        lines = self.get_output()
+        # auto scroll to bottom if running
+        if self.running:
+            self.scroll = max(0, len(lines) - (height - 1))
+        visible = lines[self.scroll:self.scroll + height - 1]
+        for i, line in enumerate(visible):
+            # color error lines red
+            if any(w in line.lower() for w in ('error', 'traceback', 'exception')):
+                color = curses.color_pair(COLOR_DIFF_DEL)
+            elif any(w in line.lower() for w in ('warning', 'warn')):
+                color = curses.color_pair(COLOR_GUTTER_MOD)
+            elif line.startswith("  [process exited"):
+                color = curses.color_pair(COLOR_PANEL)
+            else:
+                color = curses.color_pair(COLOR_NORMAL)
+            try:
+                stdscr.addstr(top + 1 + i, 0, line[:width-1], color)
+            except:
+                pass
 
 # ─── Git helpers ──────────────────────────────────────────────────────────────
 
@@ -506,6 +681,7 @@ def apply_theme(stdscr=None):
     curses.init_pair(COLOR_GUTTER_ADD, curses.COLOR_GREEN,   -1)
     curses.init_pair(COLOR_GUTTER_MOD, curses.COLOR_YELLOW,  -1)
     curses.init_pair(COLOR_GUTTER_DEL, curses.COLOR_RED,     -1)
+    curses.init_pair(COLOR_PANEL,      curses.COLOR_BLACK,   curses.COLOR_CYAN)
     if stdscr:
         stdscr.bkgd(' ', curses.color_pair(COLOR_BACKGROUND))
 
@@ -672,7 +848,6 @@ def theme_builder(stdscr, tab_size, word_wrap):
                 if x < preview_w - 1:
                     stdscr.addstr(2 + i, x, text[:preview_w - x - 1], curses.color_pair(color))
                     x += len(text)
-        # powerline statusbar preview
         left_prev = " -- NORMAL -- file.py "
         stdscr.addstr(height-1, 0, left_prev, curses.color_pair(COLOR_STATUSBAR))
         px = len(left_prev)
@@ -870,35 +1045,27 @@ def draw_statusbar(stdscr, height, width, mode, buf, lang, col, offset, message,
     now      = datetime.datetime.now().strftime("%a %d %b %H:%M")
     words    = sum(len(l.split()) for l in lines)
     filename = buf["filename"]
-
     if message:
         left = f" {message} "
     else:
         left = f" -- {mode.upper()} -- {filename or '[No Name]'} "
         if mark_line is not None:
             left += f"[MARK:{mark_line+1}] "
-
     right = f" {lang or 'plain'}  {words}w  tab:{tab_size}  {'wrap  ' if word_wrap else ''}ln {row+1}/{len(lines)}  col {col-offset+1}  {now} "
-
     try:
         if branch:
             branch_label = f" {branch} "
-            # draw left segment
             stdscr.addstr(height-1, 0, left[:width-1], curses.color_pair(COLOR_STATUSBAR))
             bx = len(left)
-            # powerline arrow: statusbar -> gitbranch
             if bx < width - 1:
                 stdscr.addstr(height-1, bx, PL_RIGHT, curses.color_pair(COLOR_GITBRANCH))
                 bx += 1
-            # branch label
             if bx < width - 1:
                 stdscr.addstr(height-1, bx, branch_label[:width-bx-1], curses.color_pair(COLOR_GITBRANCH))
                 bx += len(branch_label)
-            # powerline arrow: gitbranch -> statusbar
             if bx < width - 1:
                 stdscr.addstr(height-1, bx, PL_RIGHT, curses.color_pair(COLOR_STATUSBAR))
                 bx += 1
-            # right segment
             if bx < width - 1:
                 padding = max(0, width - bx - len(right) - 1)
                 stdscr.addstr(height-1, bx, (" " * padding + right)[:width-bx-1], curses.color_pair(COLOR_STATUSBAR))
@@ -922,7 +1089,6 @@ def draw_lines(stdscr, lines, scroll_top, text_height, offset, width, lang,
                search_pattern, show_numbers, word_wrap, mark_line, gutter_markers, scroll_left=0):
     total = len(lines)
     num_w = len(str(total))
-
     if word_wrap:
         screen_row = 1
         for li in range(scroll_top, total):
@@ -1018,6 +1184,9 @@ def main(stdscr):
     mark_line      = None
     gutter_markers = {}
     gutter_timer   = 0
+    panel          = RunPanel()
+    panel_height   = 10
+    panel_open     = False
 
     if len(sys.argv) > 1:
         buffers = [new_buffer(sys.argv[1])]
@@ -1026,6 +1195,9 @@ def main(stdscr):
     current_buf = 0
     branch = get_git_branch(buffers[current_buf]["filename"])
     gutter_markers = get_gutter_markers(buffers[current_buf]["filename"])
+
+    # set timeout so panel updates while running
+    stdscr.timeout(100)
 
     while True:
         buf         = buffers[current_buf]
@@ -1054,10 +1226,22 @@ def main(stdscr):
         buf["col"] = col
 
         draw_tabbar(stdscr, buffers, current_buf, width)
-        text_height = height - 2
+
+        # calculate heights
+        if panel_open:
+            text_height = height - 2 - panel_height - 1
+        else:
+            text_height = height - 2
+
+        text_height = max(3, text_height)
 
         draw_lines(stdscr, lines, scroll_top, text_height, offset, width, lang,
                    search_pattern, show_numbers, word_wrap[0], mark_line, gutter_markers, scroll_left)
+
+        # draw panel
+        if panel_open:
+            panel_top = text_height + 1
+            panel.draw(stdscr, panel_top, panel_height, width)
 
         if word_wrap[0]:
             cursor_screen_row, cursor_screen_col = get_cursor_screen_row(lines, row, col, offset, width, scroll_top)
@@ -1080,6 +1264,8 @@ def main(stdscr):
         stdscr.refresh()
 
         key = stdscr.getch()
+        if key == -1:
+            continue
         message = ""
 
         if mode == "search":
@@ -1104,6 +1290,12 @@ def main(stdscr):
                 search_pattern = search_pattern[:-1]
             elif 32 <= key <= 126:
                 search_pattern += chr(key)
+            continue
+
+        # Ctrl+C to kill running process
+        if key == 3 and panel_open and panel.running:
+            panel.stop()
+            message = "process killed"
             continue
 
         if key == curses.KEY_MOUSE:
@@ -1433,6 +1625,7 @@ def main(stdscr):
                     else:
                         break
                 elif command == "q!":
+                    panel.stop()
                     if len(buffers) > 1:
                         buffers.pop(current_buf)
                         current_buf = min(current_buf, len(buffers) - 1)
@@ -1443,6 +1636,7 @@ def main(stdscr):
                 elif command == "wq":
                     save(lines, buf["filename"])
                     buf["modified"] = False
+                    panel.stop()
                     if len(buffers) > 1:
                         buffers.pop(current_buf)
                         current_buf = min(current_buf, len(buffers) - 1)
@@ -1490,6 +1684,19 @@ def main(stdscr):
                     word_wrap[0] = False
                     buf["scroll_left"] = 0
                     message = "word wrap OFF"
+                elif command == "run":
+                    if buf["filename"]:
+                        panel_open = True
+                        panel.start(buf["filename"], lang)
+                        message = f"running {os.path.basename(buf['filename'])}..."
+                    else:
+                        message = "no file to run — save first!"
+                elif command == "run close":
+                    panel.stop()
+                    panel_open = False
+                    message = "panel closed"
+                elif command == "h":
+                    draw_scrollable(stdscr, HELP_LINES, " OVIM HELP ")
                 elif command == "gl":
                     git_tree(stdscr, cwd)
                     apply_theme(stdscr)
@@ -1690,5 +1897,7 @@ def main(stdscr):
                 command = command[:-1]
             elif 32 <= key <= 126:
                 command += chr(key)
+
+    panel.stop()
 
 curses.wrapper(main)
