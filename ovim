@@ -1,0 +1,694 @@
+#!/usr/bin/env python3
+import curses
+import sys
+import os
+import re
+import subprocess
+import datetime
+import json
+
+# Color pair numbers
+COLOR_LINENR     = 1
+COLOR_KEYWORD    = 2
+COLOR_STRING     = 3
+COLOR_COMMENT    = 4
+COLOR_NUMBER     = 5
+COLOR_FUNCTION   = 6
+COLOR_NORMAL     = 7
+COLOR_TILDE      = 8
+COLOR_STATUSBAR  = 9
+COLOR_BACKGROUND = 10
+
+COLOR_NAMES = [
+    ("Default",  -1),
+    ("Black",    curses.COLOR_BLACK),
+    ("Red",      curses.COLOR_RED),
+    ("Green",    curses.COLOR_GREEN),
+    ("Yellow",   curses.COLOR_YELLOW),
+    ("Blue",     curses.COLOR_BLUE),
+    ("Magenta",  curses.COLOR_MAGENTA),
+    ("Cyan",     curses.COLOR_CYAN),
+    ("White",    curses.COLOR_WHITE),
+]
+
+COLOR_ID_TO_NAME = {v: k for k, v in COLOR_NAMES}
+
+THEME_DIR = os.path.expanduser("~/.config/ovim/themes")
+
+theme = {
+    "linenr":     (COLOR_LINENR,     curses.COLOR_GREEN,   -1),
+    "keyword":    (COLOR_KEYWORD,    curses.COLOR_CYAN,    -1),
+    "string":     (COLOR_STRING,     curses.COLOR_YELLOW,  -1),
+    "comment":    (COLOR_COMMENT,    curses.COLOR_WHITE,   -1),
+    "number":     (COLOR_NUMBER,     curses.COLOR_MAGENTA, -1),
+    "function":   (COLOR_FUNCTION,   curses.COLOR_BLUE,    -1),
+    "normal":     (COLOR_NORMAL,     -1,                   -1),
+    "tilde":      (COLOR_TILDE,      curses.COLOR_BLUE,    -1),
+    "statusbar":  (COLOR_STATUSBAR,  curses.COLOR_BLACK,   curses.COLOR_GREEN),
+    "background": (COLOR_BACKGROUND, -1,                   -1),
+}
+
+PRESETS = {
+    "Default Green": {
+        "linenr":     (COLOR_LINENR,     curses.COLOR_GREEN,   -1),
+        "keyword":    (COLOR_KEYWORD,    curses.COLOR_CYAN,    -1),
+        "string":     (COLOR_STRING,     curses.COLOR_YELLOW,  -1),
+        "comment":    (COLOR_COMMENT,    curses.COLOR_WHITE,   -1),
+        "number":     (COLOR_NUMBER,     curses.COLOR_MAGENTA, -1),
+        "function":   (COLOR_FUNCTION,   curses.COLOR_BLUE,    -1),
+        "normal":     (COLOR_NORMAL,     -1,                   -1),
+        "tilde":      (COLOR_TILDE,      curses.COLOR_BLUE,    -1),
+        "statusbar":  (COLOR_STATUSBAR,  curses.COLOR_BLACK,   curses.COLOR_GREEN),
+        "background": (COLOR_BACKGROUND, -1,                   -1),
+    },
+    "Dracula": {
+        "linenr":     (COLOR_LINENR,     curses.COLOR_MAGENTA, -1),
+        "keyword":    (COLOR_KEYWORD,    curses.COLOR_MAGENTA, -1),
+        "string":     (COLOR_STRING,     curses.COLOR_YELLOW,  -1),
+        "comment":    (COLOR_COMMENT,    curses.COLOR_CYAN,    -1),
+        "number":     (COLOR_NUMBER,     curses.COLOR_MAGENTA, -1),
+        "function":   (COLOR_FUNCTION,   curses.COLOR_GREEN,   -1),
+        "normal":     (COLOR_NORMAL,     -1,                   -1),
+        "tilde":      (COLOR_TILDE,      curses.COLOR_CYAN,    -1),
+        "statusbar":  (COLOR_STATUSBAR,  curses.COLOR_BLACK,   curses.COLOR_MAGENTA),
+        "background": (COLOR_BACKGROUND, -1,                   -1),
+    },
+    "Monokai": {
+        "linenr":     (COLOR_LINENR,     curses.COLOR_YELLOW,  -1),
+        "keyword":    (COLOR_KEYWORD,    curses.COLOR_RED,     -1),
+        "string":     (COLOR_STRING,     curses.COLOR_YELLOW,  -1),
+        "comment":    (COLOR_COMMENT,    curses.COLOR_WHITE,   -1),
+        "number":     (COLOR_NUMBER,     curses.COLOR_CYAN,    -1),
+        "function":   (COLOR_FUNCTION,   curses.COLOR_GREEN,   -1),
+        "normal":     (COLOR_NORMAL,     -1,                   -1),
+        "tilde":      (COLOR_TILDE,      curses.COLOR_RED,     -1),
+        "statusbar":  (COLOR_STATUSBAR,  curses.COLOR_BLACK,   curses.COLOR_YELLOW),
+        "background": (COLOR_BACKGROUND, -1,                   -1),
+    },
+    "Nord": {
+        "linenr":     (COLOR_LINENR,     curses.COLOR_BLUE,    -1),
+        "keyword":    (COLOR_KEYWORD,    curses.COLOR_BLUE,    -1),
+        "string":     (COLOR_STRING,     curses.COLOR_GREEN,   -1),
+        "comment":    (COLOR_COMMENT,    curses.COLOR_WHITE,   -1),
+        "number":     (COLOR_NUMBER,     curses.COLOR_MAGENTA, -1),
+        "function":   (COLOR_FUNCTION,   curses.COLOR_CYAN,    -1),
+        "normal":     (COLOR_NORMAL,     -1,                   -1),
+        "tilde":      (COLOR_TILDE,      curses.COLOR_BLUE,    -1),
+        "statusbar":  (COLOR_STATUSBAR,  curses.COLOR_BLACK,   curses.COLOR_BLUE),
+        "background": (COLOR_BACKGROUND, -1,                   -1),
+    },
+}
+
+PREVIEW_CODE = [
+    "# This is a comment",
+    "def greet(name):",
+    '    msg = "Hello, world!"',
+    "    count = 42",
+    "    return msg",
+    "",
+    "greet(name)",
+]
+
+HIGHLIGHTS = {
+    "python": [
+        (COLOR_COMMENT,  r'#.*$'),
+        (COLOR_STRING,   r'\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\".*?\"|\'.*?\''),
+        (COLOR_KEYWORD,  r'\b(False|None|True|and|as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield)\b'),
+        (COLOR_FUNCTION, r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*(?=\()'),
+        (COLOR_NUMBER,   r'\b[0-9]+\.?[0-9]*\b'),
+    ],
+    "bash": [
+        (COLOR_COMMENT,  r'#.*$'),
+        (COLOR_STRING,   r'\".*?\"|\'.*?\''),
+        (COLOR_KEYWORD,  r'\b(if|then|else|elif|fi|for|while|do|done|case|esac|function|in|select|until|return|break|continue|exit|export|local|readonly|shift|source|unset)\b'),
+        (COLOR_FUNCTION, r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*(?=\(\))'),
+        (COLOR_NUMBER,   r'\b[0-9]+\b'),
+    ],
+}
+
+ELEMENTS = [
+    ("Keywords",    "keyword"),
+    ("Strings",     "string"),
+    ("Comments",    "comment"),
+    ("Numbers",     "number"),
+    ("Functions",   "function"),
+    ("Normal text", "normal"),
+    ("Line numbers","linenr"),
+    ("Tildes",      "tilde"),
+    ("Status bar",  "statusbar"),
+    ("Background",  "background"),
+]
+
+def apply_theme(stdscr=None):
+    for key, (pair, fg, bg) in theme.items():
+        curses.init_pair(pair, fg, bg)
+    if stdscr:
+        stdscr.bkgd(' ', curses.color_pair(COLOR_BACKGROUND))
+
+def save_theme_to_file(name):
+    os.makedirs(THEME_DIR, exist_ok=True)
+    data = {}
+    for key, (pair, fg, bg) in theme.items():
+        data[key] = {
+            "pair": pair,
+            "fg":   COLOR_ID_TO_NAME.get(fg, "Default"),
+            "bg":   COLOR_ID_TO_NAME.get(bg, "Default"),
+        }
+    path = os.path.join(THEME_DIR, f"{name}.json")
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=2)
+    return path
+
+def load_theme_from_file(name):
+    path = os.path.join(THEME_DIR, f"{name}.json")
+    if not os.path.exists(path):
+        return False
+    with open(path, 'r') as f:
+        data = json.load(f)
+    name_to_id = {k: v for k, v in COLOR_NAMES}
+    for key, val in data.items():
+        if key in theme:
+            pair = val["pair"]
+            fg   = name_to_id.get(val["fg"], -1)
+            bg   = name_to_id.get(val["bg"], -1)
+            theme[key] = (pair, fg, bg)
+    return True
+
+def list_saved_themes():
+    if not os.path.exists(THEME_DIR):
+        return []
+    return [f[:-5] for f in os.listdir(THEME_DIR) if f.endswith(".json")]
+
+def highlight_line(line, lang):
+    if not lang or lang not in HIGHLIGHTS:
+        return [(line, COLOR_NORMAL)]
+    spans = []
+    for color, pattern in HIGHLIGHTS[lang]:
+        for m in re.finditer(pattern, line):
+            spans.append((m.start(), m.end(), color))
+    if not spans:
+        return [(line, COLOR_NORMAL)]
+    spans.sort(key=lambda s: s[0])
+    merged = []
+    for span in spans:
+        if merged and span[0] < merged[-1][1]:
+            continue
+        merged.append(span)
+    chunks = []
+    pos = 0
+    for start, end, color in merged:
+        if pos < start:
+            chunks.append((line[pos:start], COLOR_NORMAL))
+        chunks.append((line[start:end], color))
+        pos = end
+    if pos < len(line):
+        chunks.append((line[pos:], COLOR_NORMAL))
+    return chunks
+
+def draw_menu(stdscr, title, options):
+    height, width = stdscr.getmaxyx()
+    menu_h = len(options) + 4
+    menu_w = max(len(title), max(len(o) for o in options)) + 6
+    y = (height - menu_h) // 2
+    x = (width  - menu_w) // 2
+    selected = 0
+    while True:
+        stdscr.attron(curses.color_pair(COLOR_STATUSBAR))
+        for i in range(menu_h):
+            stdscr.addstr(y + i, x, " " * menu_w)
+        stdscr.attroff(curses.color_pair(COLOR_STATUSBAR))
+        stdscr.addstr(y + 1, x + (menu_w - len(title)) // 2, title,
+                      curses.color_pair(COLOR_STATUSBAR) | curses.A_BOLD)
+        for i, opt in enumerate(options):
+            attr = curses.color_pair(COLOR_STATUSBAR) | curses.A_REVERSE if i == selected \
+                   else curses.color_pair(COLOR_STATUSBAR)
+            stdscr.addstr(y + 2 + i, x + 2, opt.ljust(menu_w - 4), attr)
+        stdscr.refresh()
+        key = stdscr.getch()
+        if key == curses.KEY_UP and selected > 0:
+            selected -= 1
+        elif key == curses.KEY_DOWN and selected < len(options) - 1:
+            selected += 1
+        elif key in (curses.KEY_ENTER, 10, 13):
+            return selected
+        elif key == 27:
+            return None
+
+def draw_color_picker(stdscr, title):
+    options = [name for name, _ in COLOR_NAMES]
+    idx = draw_menu(stdscr, title, options)
+    if idx is None:
+        return None
+    return COLOR_NAMES[idx][1]
+
+def prompt_input(stdscr, prompt):
+    height, width = stdscr.getmaxyx()
+    stdscr.addstr(height-1, 0, prompt.ljust(width-1), curses.color_pair(COLOR_STATUSBAR))
+    curses.echo()
+    curses.curs_set(1)
+    stdscr.move(height-1, len(prompt))
+    try:
+        val = stdscr.getstr(height-1, len(prompt), 40).decode()
+    except:
+        val = ""
+    curses.noecho()
+    return val
+
+def theme_builder(stdscr):
+    selected = 0
+    message = ""
+    while True:
+        stdscr.clear()
+        height, width = stdscr.getmaxyx()
+        preview_w = width // 2
+        side_w    = width - preview_w - 1
+
+        # title bar
+        title = " THEME BUILDER "
+        stdscr.addstr(0, 0, title.center(width), curses.color_pair(COLOR_STATUSBAR) | curses.A_BOLD)
+
+        # preview panel
+        stdscr.addstr(1, 0, " PREVIEW".ljust(preview_w), curses.color_pair(COLOR_STATUSBAR))
+        for i, line in enumerate(PREVIEW_CODE):
+            chunks = highlight_line(line, "python")
+            x = 1
+            for text, color in chunks:
+                if x < preview_w - 1:
+                    stdscr.addstr(2 + i, x, text[:preview_w - x - 1], curses.color_pair(color))
+                    x += len(text)
+
+        # divider
+        for i in range(1, height - 2):
+            stdscr.addstr(i, preview_w, "│", curses.color_pair(COLOR_NORMAL))
+
+        # side panel
+        stdscr.addstr(1, preview_w + 1, " ELEMENTS".ljust(side_w), curses.color_pair(COLOR_STATUSBAR))
+        for i, (label, key) in enumerate(ELEMENTS):
+            pair, fg, bg = theme[key]
+            fg_name = COLOR_ID_TO_NAME.get(fg, "Default")
+            bg_name = COLOR_ID_TO_NAME.get(bg, "Default")
+            entry = f" {label}: {fg_name}/{bg_name}"
+            if i == selected:
+                stdscr.addstr(2 + i, preview_w + 1, entry.ljust(side_w),
+                              curses.color_pair(COLOR_STATUSBAR) | curses.A_REVERSE)
+            else:
+                stdscr.addstr(2 + i, preview_w + 1, entry.ljust(side_w),
+                              curses.color_pair(pair))
+
+        # bottom bar
+        bottom = " [Enter] Edit  [S] Save  [L] Load  [D] Delete  [Q] Done"
+        if message:
+            bottom = f" {message}"
+        stdscr.addstr(height-1, 0, bottom.ljust(width-1), curses.color_pair(COLOR_STATUSBAR))
+
+        stdscr.refresh()
+        key = stdscr.getch()
+        message = ""
+
+        if key == curses.KEY_UP and selected > 0:
+            selected -= 1
+        elif key == curses.KEY_DOWN and selected < len(ELEMENTS) - 1:
+            selected += 1
+        elif key in (curses.KEY_ENTER, 10, 13):
+            _, elem_key = ELEMENTS[selected]
+            pair, fg, bg = theme[elem_key]
+            new_fg = draw_color_picker(stdscr, f" {ELEMENTS[selected][0]} FG ")
+            if new_fg is None:
+                continue
+            new_bg = draw_color_picker(stdscr, f" {ELEMENTS[selected][0]} BG ")
+            if new_bg is None:
+                continue
+            theme[elem_key] = (pair, new_fg, new_bg)
+            apply_theme(stdscr)
+        elif key == ord('s') or key == ord('S'):
+            name = prompt_input(stdscr, " Save theme as: ")
+            if name.strip():
+                path = save_theme_to_file(name.strip())
+                message = f"saved to {path}"
+        elif key == ord('l') or key == ord('L'):
+            saved = list_saved_themes()
+            if not saved:
+                message = "no saved themes found!"
+            else:
+                idx = draw_menu(stdscr, " LOAD THEME ", saved + ["Cancel"])
+                if idx is not None and idx < len(saved):
+                    if load_theme_from_file(saved[idx]):
+                        apply_theme(stdscr)
+                        message = f"loaded {saved[idx]}"
+                    else:
+                        message = "failed to load theme"
+        elif key == ord('d') or key == ord('D'):
+            saved = list_saved_themes()
+            if not saved:
+                message = "no saved themes found!"
+            else:
+                idx = draw_menu(stdscr, " DELETE THEME ", saved + ["Cancel"])
+                if idx is not None and idx < len(saved):
+                    confirm = draw_menu(stdscr, " ARE YOU SURE? ", ["Yes, delete it", "Cancel"])
+                    if confirm == 0:
+                        path = os.path.join(THEME_DIR, f"{saved[idx]}.json")
+                        os.remove(path)
+                        message = f"deleted {saved[idx]}"
+        elif key in (ord('q'), ord('Q'), 27):
+            break
+
+def open_theme_menu(stdscr):
+    choice = draw_menu(stdscr, " THEME ", ["Presets", "Customize", "Theme Builder", "Cancel"])
+    if choice is None or choice == 3:
+        return
+    if choice == 0:
+        preset_names = list(PRESETS.keys())
+        idx = draw_menu(stdscr, " PRESETS ", preset_names + ["Cancel"])
+        if idx is None or idx == len(preset_names):
+            return
+        preset = PRESETS[preset_names[idx]]
+        for key, val in preset.items():
+            theme[key] = val
+        apply_theme(stdscr)
+    elif choice == 1:
+        labels = [e[0] for e in ELEMENTS] + ["Done"]
+        while True:
+            idx = draw_menu(stdscr, " CUSTOMIZE ", labels)
+            if idx is None or idx == len(ELEMENTS):
+                break
+            _, key = ELEMENTS[idx]
+            pair, fg, bg = theme[key]
+            new_fg = draw_color_picker(stdscr, f" {ELEMENTS[idx][0]} FG ")
+            if new_fg is None:
+                continue
+            new_bg = draw_color_picker(stdscr, f" {ELEMENTS[idx][0]} BG ")
+            if new_bg is None:
+                continue
+            theme[key] = (pair, new_fg, new_bg)
+            apply_theme(stdscr)
+    elif choice == 2:
+        theme_builder(stdscr)
+
+def detect_language(filename, lines):
+    if filename:
+        ext = os.path.splitext(filename)[1]
+        if ext == ".py":
+            return "python"
+        elif ext == ".sh":
+            return "bash"
+    if lines and lines[0].startswith("#!"):
+        shebang = lines[0].lower()
+        if "python" in shebang:
+            return "python"
+        elif "bash" in shebang or "sh" in shebang:
+            return "bash"
+    return None
+
+def get_auto_indent(line, lang):
+    indent = len(line) - len(line.lstrip())
+    current_indent = line[:indent]
+    stripped = line.rstrip()
+    if lang == "python" and stripped.endswith(":"):
+        return current_indent + "    "
+    elif lang == "bash" and (stripped.endswith("then") or
+                              stripped.endswith("do") or
+                              stripped.endswith("{") or
+                              stripped.endswith("()")):
+        return current_indent + "    "
+    return current_indent
+
+def copy_to_clipboard(text):
+    try:
+        subprocess.run(['wl-copy'], input=text.encode(), check=True)
+    except:
+        pass
+
+def paste_from_clipboard():
+    try:
+        result = subprocess.run(['wl-paste', '--no-newline'], capture_output=True)
+        return result.stdout.decode()
+    except:
+        return ""
+
+def save(lines, filename):
+    if filename:
+        with open(filename, 'w') as f:
+            f.write('\n'.join(lines))
+        return True
+    return False
+
+def num_offset(total_lines, show_numbers):
+    if show_numbers:
+        return len(str(total_lines)) + 1
+    return 0
+
+def clamp_scroll(row, scroll_top, height):
+    if row < scroll_top:
+        scroll_top = row
+    elif row >= scroll_top + height - 1:
+        scroll_top = row - height + 2
+    return scroll_top
+
+def draw_statusbar(stdscr, height, width, mode, filename, lang, row, col, offset, lines, message):
+    now = datetime.datetime.now().strftime("%a %d %b %H:%M")
+    if message:
+        left = f" {message}"
+    else:
+        left = f" -- {mode.upper()} -- {filename or '[No Name]'}"
+    right = f"{lang or 'plain'}  ln {row+1}/{len(lines)}  col {col-offset+1}  {now} "
+    padding = max(0, width - len(left) - len(right))
+    status = left + " " * padding + right
+    stdscr.addstr(height-1, 0, status[:width-1], curses.color_pair(COLOR_STATUSBAR))
+
+def main(stdscr):
+    row = 0
+    col = 0
+    scroll_top = 0
+    mode = "normal"
+    show_numbers = True
+    dd_pending = False
+    yy_pending = False
+    command = ""
+    message = ""
+    yank_buffer = ""
+
+    curses.use_default_colors()
+    curses.start_color()
+    apply_theme(stdscr)
+    curses.mousemask(curses.ALL_MOUSE_EVENTS)
+
+    filename = sys.argv[1] if len(sys.argv) > 1 else None
+
+    if filename and os.path.exists(filename):
+        with open(filename, 'r') as f:
+            lines = f.read().splitlines()
+        if not lines:
+            lines = [""]
+    else:
+        lines = [""]
+
+    col = num_offset(len(lines), show_numbers)
+
+    while True:
+        stdscr.clear()
+        height, width = stdscr.getmaxyx()
+        lang = detect_language(filename, lines)
+        offset = num_offset(len(lines), show_numbers)
+
+        visible = lines[scroll_top:scroll_top + height - 1]
+        for i, line in enumerate(visible):
+            x = 0
+            if show_numbers:
+                num = str(scroll_top + i + 1).rjust(len(str(len(lines)))) + " "
+                stdscr.addstr(i, 0, num, curses.color_pair(COLOR_LINENR))
+                x = len(num)
+            chunks = highlight_line(line, lang)
+            for text, color in chunks:
+                if x < width:
+                    stdscr.addstr(i, x, text[:width - x], curses.color_pair(color))
+                    x += len(text)
+
+        for i in range(len(visible), height - 1):
+            stdscr.addstr(i, 0, "~", curses.color_pair(COLOR_TILDE))
+
+        if mode == "command":
+            stdscr.addstr(height-1, 0, f":{command}    ", curses.color_pair(COLOR_STATUSBAR))
+        else:
+            draw_statusbar(stdscr, height, width, mode, filename, lang, row, col, offset, lines, message)
+
+        stdscr.move(row - scroll_top, col)
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        message = ""
+
+        if key == curses.KEY_MOUSE:
+            try:
+                _, mx, my, _, bstate = curses.getmouse()
+                if bstate & curses.BUTTON1_CLICKED:
+                    new_row = my + scroll_top
+                    if new_row < len(lines):
+                        row = new_row
+                        col = max(min(mx, len(lines[row]) + offset), offset)
+                        scroll_top = clamp_scroll(row, scroll_top, height)
+                elif bstate & curses.BUTTON4_PRESSED:
+                    row = max(0, row - 3)
+                    col = max(min(col, len(lines[row]) + offset), offset)
+                    scroll_top = clamp_scroll(row, scroll_top, height)
+                elif bstate & curses.BUTTON5_PRESSED:
+                    row = min(len(lines) - 1, row + 3)
+                    col = max(min(col, len(lines[row]) + offset), offset)
+                    scroll_top = clamp_scroll(row, scroll_top, height)
+            except curses.error:
+                pass
+        elif key == curses.KEY_UP and row > 0:
+            row -= 1
+            col = max(min(col, len(lines[row]) + offset), offset)
+            scroll_top = clamp_scroll(row, scroll_top, height)
+        elif key == curses.KEY_DOWN and row < len(lines) - 1:
+            row += 1
+            col = max(min(col, len(lines[row]) + offset), offset)
+            scroll_top = clamp_scroll(row, scroll_top, height)
+        elif key == curses.KEY_LEFT and col > offset:
+            col -= 1
+        elif key == curses.KEY_RIGHT and col < len(lines[row]) + offset:
+            col += 1
+
+        elif mode == "normal":
+            if key == ord(' '):
+                open_theme_menu(stdscr)
+            elif key == ord('i'):
+                mode = "insert"
+                dd_pending = False
+                yy_pending = False
+            elif key == ord(':'):
+                mode = "command"
+                command = ""
+            elif key == ord('h'):
+                if col > offset:
+                    col -= 1
+            elif key == ord('l'):
+                if col < len(lines[row]) + offset:
+                    col += 1
+            elif key == ord('j'):
+                if row < len(lines) - 1:
+                    row += 1
+                    col = max(min(col, len(lines[row]) + offset), offset)
+                    scroll_top = clamp_scroll(row, scroll_top, height)
+            elif key == ord('k'):
+                if row > 0:
+                    row -= 1
+                    col = max(min(col, len(lines[row]) + offset), offset)
+                    scroll_top = clamp_scroll(row, scroll_top, height)
+            elif key == ord('o'):
+                lines.insert(row + 1, "")
+                row += 1
+                col = num_offset(len(lines), show_numbers)
+                mode = "insert"
+                scroll_top = clamp_scroll(row, scroll_top, height)
+            elif key == ord('x'):
+                if col - offset < len(lines[row]):
+                    lines[row] = lines[row][:col-offset] + lines[row][col-offset+1:]
+            elif key == ord('n'):
+                show_numbers = not show_numbers
+                col = max(col, num_offset(len(lines), show_numbers))
+            elif key == ord('p'):
+                text = yank_buffer if yank_buffer else paste_from_clipboard()
+                if text:
+                    paste_lines = text.split('\n')
+                    for j, pl in enumerate(paste_lines):
+                        lines.insert(row + 1 + j, pl)
+                    row += len(paste_lines)
+                    col = num_offset(len(lines), show_numbers)
+                    scroll_top = clamp_scroll(row, scroll_top, height)
+                    message = "pasted"
+            elif key == ord('P'):
+                text = yank_buffer if yank_buffer else paste_from_clipboard()
+                if text:
+                    paste_lines = text.split('\n')
+                    for j, pl in enumerate(paste_lines):
+                        lines.insert(row + j, pl)
+                    col = num_offset(len(lines), show_numbers)
+                    scroll_top = clamp_scroll(row, scroll_top, height)
+                    message = "pasted above"
+            elif key == ord('d'):
+                if dd_pending:
+                    if len(lines) > 1:
+                        lines.pop(row)
+                        if row >= len(lines):
+                            row -= 1
+                    else:
+                        lines = [""]
+                    col = num_offset(len(lines), show_numbers)
+                    scroll_top = clamp_scroll(row, scroll_top, height)
+                    dd_pending = False
+                else:
+                    dd_pending = True
+                    yy_pending = False
+            elif key == ord('y'):
+                if yy_pending:
+                    yank_buffer = lines[row]
+                    copy_to_clipboard(yank_buffer)
+                    message = "line yanked!"
+                    yy_pending = False
+                else:
+                    yy_pending = True
+                    dd_pending = False
+            elif key == 27:
+                dd_pending = False
+                yy_pending = False
+
+        elif mode == "insert":
+            if key == 27:
+                mode = "normal"
+                dd_pending = False
+                yy_pending = False
+            elif key == 9:
+                tab = "    "
+                lines[row] = lines[row][:col-offset] + tab + lines[row][col-offset:]
+                col += 4
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                if col > offset:
+                    lines[row] = lines[row][:col-offset-1] + lines[row][col-offset:]
+                    col -= 1
+                elif row > 0:
+                    prev_offset = num_offset(len(lines), show_numbers)
+                    col = len(lines[row - 1]) + prev_offset
+                    lines[row - 1] = lines[row - 1] + lines[row]
+                    lines.pop(row)
+                    row -= 1
+                    scroll_top = clamp_scroll(row, scroll_top, height)
+            elif key in (curses.KEY_ENTER, 10, 13):
+                indent = get_auto_indent(lines[row], lang)
+                new_line = lines[row][col-offset:]
+                lines[row] = lines[row][:col-offset]
+                lines.insert(row + 1, indent + new_line)
+                row += 1
+                col = num_offset(len(lines), show_numbers) + len(indent)
+                scroll_top = clamp_scroll(row, scroll_top, height)
+            elif 32 <= key <= 126:
+                lines[row] = lines[row][:col-offset] + chr(key) + lines[row][col-offset:]
+                col += 1
+
+        elif mode == "command":
+            if key == 27:
+                mode = "normal"
+                command = ""
+            elif key in (curses.KEY_ENTER, 10, 13):
+                if command == "w":
+                    if save(lines, filename):
+                        message = f"saved to {filename}"
+                    else:
+                        message = "no filename!"
+                elif command == "q":
+                    break
+                elif command == "wq":
+                    save(lines, filename)
+                    break
+                elif command.startswith("w "):
+                    filename = command[2:]
+                    save(lines, filename)
+                    message = f"saved to {filename}"
+                mode = "normal"
+                command = ""
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                command = command[:-1]
+            elif 32 <= key <= 126:
+                command += chr(key)
+
+curses.wrapper(main)
