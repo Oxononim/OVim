@@ -18,6 +18,8 @@ COLOR_NORMAL     = 7
 COLOR_TILDE      = 8
 COLOR_STATUSBAR  = 9
 COLOR_BACKGROUND = 10
+COLOR_SEARCH     = 11
+COLOR_GITBRANCH  = 12
 
 COLOR_NAMES = [
     ("Default",  -1),
@@ -32,7 +34,6 @@ COLOR_NAMES = [
 ]
 
 COLOR_ID_TO_NAME = {v: k for k, v in COLOR_NAMES}
-
 THEME_DIR = os.path.expanduser("~/.config/ovim/themes")
 
 theme = {
@@ -46,6 +47,7 @@ theme = {
     "tilde":      (COLOR_TILDE,      curses.COLOR_BLUE,    -1),
     "statusbar":  (COLOR_STATUSBAR,  curses.COLOR_BLACK,   curses.COLOR_GREEN),
     "background": (COLOR_BACKGROUND, -1,                   -1),
+    "gitbranch":  (COLOR_GITBRANCH,  curses.COLOR_BLACK,   curses.COLOR_CYAN),
 }
 
 PRESETS = {
@@ -60,6 +62,7 @@ PRESETS = {
         "tilde":      (COLOR_TILDE,      curses.COLOR_BLUE,    -1),
         "statusbar":  (COLOR_STATUSBAR,  curses.COLOR_BLACK,   curses.COLOR_GREEN),
         "background": (COLOR_BACKGROUND, -1,                   -1),
+        "gitbranch":  (COLOR_GITBRANCH,  curses.COLOR_BLACK,   curses.COLOR_CYAN),
     },
     "Dracula": {
         "linenr":     (COLOR_LINENR,     curses.COLOR_MAGENTA, -1),
@@ -72,6 +75,7 @@ PRESETS = {
         "tilde":      (COLOR_TILDE,      curses.COLOR_CYAN,    -1),
         "statusbar":  (COLOR_STATUSBAR,  curses.COLOR_BLACK,   curses.COLOR_MAGENTA),
         "background": (COLOR_BACKGROUND, -1,                   -1),
+        "gitbranch":  (COLOR_GITBRANCH,  curses.COLOR_BLACK,   curses.COLOR_CYAN),
     },
     "Monokai": {
         "linenr":     (COLOR_LINENR,     curses.COLOR_YELLOW,  -1),
@@ -84,6 +88,7 @@ PRESETS = {
         "tilde":      (COLOR_TILDE,      curses.COLOR_RED,     -1),
         "statusbar":  (COLOR_STATUSBAR,  curses.COLOR_BLACK,   curses.COLOR_YELLOW),
         "background": (COLOR_BACKGROUND, -1,                   -1),
+        "gitbranch":  (COLOR_GITBRANCH,  curses.COLOR_BLACK,   curses.COLOR_GREEN),
     },
     "Nord": {
         "linenr":     (COLOR_LINENR,     curses.COLOR_BLUE,    -1),
@@ -96,6 +101,7 @@ PRESETS = {
         "tilde":      (COLOR_TILDE,      curses.COLOR_BLUE,    -1),
         "statusbar":  (COLOR_STATUSBAR,  curses.COLOR_BLACK,   curses.COLOR_BLUE),
         "background": (COLOR_BACKGROUND, -1,                   -1),
+        "gitbranch":  (COLOR_GITBRANCH,  curses.COLOR_BLACK,   curses.COLOR_CYAN),
     },
 }
 
@@ -137,17 +143,41 @@ ELEMENTS = [
     ("Tildes",      "tilde"),
     ("Status bar",  "statusbar"),
     ("Background",  "background"),
+    ("Git branch",  "gitbranch"),
+    ("Word Wrap",   "__wrap__"),
 ]
+
+PAIRS = {'(': ')', '[': ']', '{': '}', '"': '"', "'": "'"}
+
+def new_buffer(filename=None):
+    lines = [""]
+    if filename and os.path.exists(filename):
+        with open(filename, 'r') as f:
+            content = f.read().splitlines()
+        if content:
+            lines = content
+    return {
+        "lines":       lines,
+        "filename":    filename,
+        "row":         0,
+        "col":         0,
+        "scroll_top":  0,
+        "scroll_left": 0,
+        "modified":    False,
+        "undo_stack":  [],
+        "redo_stack":  [],
+    }
 
 def apply_theme(stdscr=None):
     for key, (pair, fg, bg) in theme.items():
         curses.init_pair(pair, fg, bg)
+    curses.init_pair(COLOR_SEARCH, curses.COLOR_BLACK, curses.COLOR_YELLOW)
     if stdscr:
         stdscr.bkgd(' ', curses.color_pair(COLOR_BACKGROUND))
 
-def save_theme_to_file(name):
+def save_theme_to_file(name, tab_size, word_wrap):
     os.makedirs(THEME_DIR, exist_ok=True)
-    data = {}
+    data = {"tab_size": tab_size[0], "word_wrap": word_wrap[0]}
     for key, (pair, fg, bg) in theme.items():
         data[key] = {
             "pair": pair,
@@ -159,15 +189,19 @@ def save_theme_to_file(name):
         json.dump(data, f, indent=2)
     return path
 
-def load_theme_from_file(name):
+def load_theme_from_file(name, tab_size, word_wrap):
     path = os.path.join(THEME_DIR, f"{name}.json")
     if not os.path.exists(path):
         return False
     with open(path, 'r') as f:
         data = json.load(f)
     name_to_id = {k: v for k, v in COLOR_NAMES}
+    if "tab_size" in data:
+        tab_size[0] = data["tab_size"]
+    if "word_wrap" in data:
+        word_wrap[0] = data["word_wrap"]
     for key, val in data.items():
-        if key in theme:
+        if key in theme and isinstance(val, dict):
             pair = val["pair"]
             fg   = name_to_id.get(val["fg"], -1)
             bg   = name_to_id.get(val["bg"], -1)
@@ -179,19 +213,57 @@ def list_saved_themes():
         return []
     return [f[:-5] for f in os.listdir(THEME_DIR) if f.endswith(".json")]
 
-def highlight_line(line, lang):
-    if not lang or lang not in HIGHLIGHTS:
-        return [(line, COLOR_NORMAL)]
+def get_git_branch(filename):
+    if not filename:
+        return None
+    try:
+        result = subprocess.run(
+            ['git', 'branch', '--show-current'],
+            capture_output=True,
+            cwd=os.path.dirname(os.path.abspath(filename))
+        )
+        branch = result.stdout.decode().strip()
+        return branch if branch else None
+    except:
+        return None
+
+def wrap_line(line, width, offset):
+    text_width = width - offset
+    if text_width <= 0:
+        return [line]
+    if len(line) <= text_width:
+        return [line]
+    chunks = []
+    while line:
+        chunks.append(line[:text_width])
+        line = line[text_width:]
+    return chunks
+
+def highlight_line(line, lang, search_pattern=None):
     spans = []
-    for color, pattern in HIGHLIGHTS[lang]:
-        for m in re.finditer(pattern, line):
-            spans.append((m.start(), m.end(), color))
+    if lang and lang in HIGHLIGHTS:
+        for color, pattern in HIGHLIGHTS[lang]:
+            for m in re.finditer(pattern, line):
+                spans.append((m.start(), m.end(), color))
+    if search_pattern:
+        try:
+            for m in re.finditer(search_pattern, line):
+                spans.append((m.start(), m.end(), COLOR_SEARCH))
+        except re.error:
+            pass
     if not spans:
         return [(line, COLOR_NORMAL)]
     spans.sort(key=lambda s: s[0])
     merged = []
     for span in spans:
         if merged and span[0] < merged[-1][1]:
+            if span[2] == COLOR_SEARCH:
+                last = merged[-1]
+                if last[0] < span[0]:
+                    merged[-1] = (last[0], span[0], last[2])
+                else:
+                    merged.pop()
+                merged.append(span)
             continue
         merged.append(span)
     chunks = []
@@ -204,6 +276,18 @@ def highlight_line(line, lang):
     if pos < len(line):
         chunks.append((line[pos:], COLOR_NORMAL))
     return chunks
+
+def get_search_matches(lines, pattern):
+    matches = []
+    if not pattern:
+        return matches
+    try:
+        for i, line in enumerate(lines):
+            for m in re.finditer(pattern, line):
+                matches.append((i, m.start()))
+    except re.error:
+        pass
+    return matches
 
 def draw_menu(stdscr, title, options):
     height, width = stdscr.getmaxyx()
@@ -254,7 +338,7 @@ def prompt_input(stdscr, prompt):
     curses.noecho()
     return val
 
-def theme_builder(stdscr):
+def theme_builder(stdscr, tab_size, word_wrap):
     selected = 0
     message = ""
     while True:
@@ -262,12 +346,8 @@ def theme_builder(stdscr):
         height, width = stdscr.getmaxyx()
         preview_w = width // 2
         side_w    = width - preview_w - 1
-
-        # title bar
         title = " THEME BUILDER "
         stdscr.addstr(0, 0, title.center(width), curses.color_pair(COLOR_STATUSBAR) | curses.A_BOLD)
-
-        # preview panel
         stdscr.addstr(1, 0, " PREVIEW".ljust(preview_w), curses.color_pair(COLOR_STATUSBAR))
         for i, line in enumerate(PREVIEW_CODE):
             chunks = highlight_line(line, "python")
@@ -276,54 +356,59 @@ def theme_builder(stdscr):
                 if x < preview_w - 1:
                     stdscr.addstr(2 + i, x, text[:preview_w - x - 1], curses.color_pair(color))
                     x += len(text)
-
-        # divider
+        branch_preview = " main "
+        stdscr.addstr(height-1, 0, " -- NORMAL -- file.py", curses.color_pair(COLOR_STATUSBAR))
+        stdscr.addstr(height-1, 22, branch_preview, curses.color_pair(COLOR_GITBRANCH))
+        stdscr.addstr(height-1, 22 + len(branch_preview), " python  42w ", curses.color_pair(COLOR_STATUSBAR))
         for i in range(1, height - 2):
             stdscr.addstr(i, preview_w, "│", curses.color_pair(COLOR_NORMAL))
-
-        # side panel
         stdscr.addstr(1, preview_w + 1, " ELEMENTS".ljust(side_w), curses.color_pair(COLOR_STATUSBAR))
         for i, (label, key) in enumerate(ELEMENTS):
-            pair, fg, bg = theme[key]
-            fg_name = COLOR_ID_TO_NAME.get(fg, "Default")
-            bg_name = COLOR_ID_TO_NAME.get(bg, "Default")
-            entry = f" {label}: {fg_name}/{bg_name}"
+            if key == "__wrap__":
+                entry = f" {label}: {'ON' if word_wrap[0] else 'OFF'}"
+                color = COLOR_STATUSBAR
+            else:
+                pair, fg, bg = theme[key]
+                fg_name = COLOR_ID_TO_NAME.get(fg, "Default")
+                bg_name = COLOR_ID_TO_NAME.get(bg, "Default")
+                entry = f" {label}: {fg_name}/{bg_name}"
+                color = pair
             if i == selected:
                 stdscr.addstr(2 + i, preview_w + 1, entry.ljust(side_w),
                               curses.color_pair(COLOR_STATUSBAR) | curses.A_REVERSE)
             else:
                 stdscr.addstr(2 + i, preview_w + 1, entry.ljust(side_w),
-                              curses.color_pair(pair))
-
-        # bottom bar
-        bottom = " [Enter] Edit  [S] Save  [L] Load  [D] Delete  [Q] Done"
+                              curses.color_pair(color))
+        bottom = " [Enter] Edit/Toggle  [S] Save  [L] Load  [D] Delete  [T] Tab size  [Q] Done"
         if message:
             bottom = f" {message}"
-        stdscr.addstr(height-1, 0, bottom.ljust(width-1), curses.color_pair(COLOR_STATUSBAR))
-
+        stdscr.addstr(height-2, 0, bottom.ljust(width-1), curses.color_pair(COLOR_STATUSBAR))
         stdscr.refresh()
         key = stdscr.getch()
         message = ""
-
         if key == curses.KEY_UP and selected > 0:
             selected -= 1
         elif key == curses.KEY_DOWN and selected < len(ELEMENTS) - 1:
             selected += 1
         elif key in (curses.KEY_ENTER, 10, 13):
             _, elem_key = ELEMENTS[selected]
-            pair, fg, bg = theme[elem_key]
+            if elem_key == "__wrap__":
+                word_wrap[0] = not word_wrap[0]
+                message = f"word wrap {'ON' if word_wrap[0] else 'OFF'}"
+                continue
             new_fg = draw_color_picker(stdscr, f" {ELEMENTS[selected][0]} FG ")
             if new_fg is None:
                 continue
             new_bg = draw_color_picker(stdscr, f" {ELEMENTS[selected][0]} BG ")
             if new_bg is None:
                 continue
+            pair = theme[elem_key][0]
             theme[elem_key] = (pair, new_fg, new_bg)
             apply_theme(stdscr)
         elif key == ord('s') or key == ord('S'):
             name = prompt_input(stdscr, " Save theme as: ")
             if name.strip():
-                path = save_theme_to_file(name.strip())
+                path = save_theme_to_file(name.strip(), tab_size, word_wrap)
                 message = f"saved to {path}"
         elif key == ord('l') or key == ord('L'):
             saved = list_saved_themes()
@@ -332,7 +417,7 @@ def theme_builder(stdscr):
             else:
                 idx = draw_menu(stdscr, " LOAD THEME ", saved + ["Cancel"])
                 if idx is not None and idx < len(saved):
-                    if load_theme_from_file(saved[idx]):
+                    if load_theme_from_file(saved[idx], tab_size, word_wrap):
                         apply_theme(stdscr)
                         message = f"loaded {saved[idx]}"
                     else:
@@ -349,10 +434,17 @@ def theme_builder(stdscr):
                         path = os.path.join(THEME_DIR, f"{saved[idx]}.json")
                         os.remove(path)
                         message = f"deleted {saved[idx]}"
+        elif key == ord('t') or key == ord('T'):
+            val = prompt_input(stdscr, " Tab size: ")
+            try:
+                tab_size[0] = max(1, int(val.strip()))
+                message = f"tab size set to {tab_size[0]}"
+            except ValueError:
+                message = "invalid tab size"
         elif key in (ord('q'), ord('Q'), 27):
             break
 
-def open_theme_menu(stdscr):
+def open_theme_menu(stdscr, tab_size, word_wrap):
     choice = draw_menu(stdscr, " THEME ", ["Presets", "Customize", "Theme Builder", "Cancel"])
     if choice is None or choice == 3:
         return
@@ -372,7 +464,10 @@ def open_theme_menu(stdscr):
             if idx is None or idx == len(ELEMENTS):
                 break
             _, key = ELEMENTS[idx]
-            pair, fg, bg = theme[key]
+            if key == "__wrap__":
+                word_wrap[0] = not word_wrap[0]
+                continue
+            pair = theme[key][0]
             new_fg = draw_color_picker(stdscr, f" {ELEMENTS[idx][0]} FG ")
             if new_fg is None:
                 continue
@@ -382,7 +477,7 @@ def open_theme_menu(stdscr):
             theme[key] = (pair, new_fg, new_bg)
             apply_theme(stdscr)
     elif choice == 2:
-        theme_builder(stdscr)
+        theme_builder(stdscr, tab_size, word_wrap)
 
 def detect_language(filename, lines):
     if filename:
@@ -444,178 +539,448 @@ def clamp_scroll(row, scroll_top, height):
         scroll_top = row - height + 2
     return scroll_top
 
-def draw_statusbar(stdscr, height, width, mode, filename, lang, row, col, offset, lines, message):
-    now = datetime.datetime.now().strftime("%a %d %b %H:%M")
+def push_undo(buf):
+    buf["undo_stack"].append((list(buf["lines"]), buf["row"], buf["col"]))
+    buf["redo_stack"].clear()
+
+def draw_tabbar(stdscr, buffers, current, width):
+    x = 0
+    for i, buf in enumerate(buffers):
+        name = os.path.basename(buf["filename"]) if buf["filename"] else "[No Name]"
+        if buf["modified"]:
+            name += " ●"
+        label = f" {name} "
+        if x + len(label) > width:
+            break
+        if i == current:
+            stdscr.addstr(0, x, label, curses.color_pair(COLOR_STATUSBAR) | curses.A_BOLD)
+        else:
+            stdscr.addstr(0, x, label, curses.color_pair(COLOR_NORMAL) | curses.A_REVERSE)
+        x += len(label)
+        stdscr.addstr(0, x, "│", curses.color_pair(COLOR_NORMAL))
+        x += 1
+
+def draw_statusbar(stdscr, height, width, mode, buf, lang, col, offset, message, tab_size, branch, word_wrap):
+    lines    = buf["lines"]
+    row      = buf["row"]
+    now      = datetime.datetime.now().strftime("%a %d %b %H:%M")
+    words    = sum(len(l.split()) for l in lines)
+    filename = buf["filename"]
+
     if message:
         left = f" {message}"
     else:
         left = f" -- {mode.upper()} -- {filename or '[No Name]'}"
-    right = f"{lang or 'plain'}  ln {row+1}/{len(lines)}  col {col-offset+1}  {now} "
-    padding = max(0, width - len(left) - len(right))
-    status = left + " " * padding + right
-    stdscr.addstr(height-1, 0, status[:width-1], curses.color_pair(COLOR_STATUSBAR))
+
+    right = f"{lang or 'plain'}  {words}w  tab:{tab_size}  {'wrap  ' if word_wrap else ''}ln {row+1}/{len(lines)}  col {col-offset+1}  {now} "
+
+    if branch:
+        branch_label = f" {branch} "
+        padding = max(0, width - 1 - len(left) - len(branch_label) - len(right))
+        stdscr.addstr(height-1, 0, left[:width-1], curses.color_pair(COLOR_STATUSBAR))
+        bx = len(left)
+        if bx < width - 1:
+            stdscr.addstr(height-1, bx, branch_label[:width-1-bx], curses.color_pair(COLOR_GITBRANCH))
+        rx = bx + len(branch_label)
+        if rx < width - 1:
+            rest = (" " * padding + right)
+            stdscr.addstr(height-1, rx, rest[:width-1-rx], curses.color_pair(COLOR_STATUSBAR))
+    else:
+        padding = max(0, width - len(left) - len(right))
+        status = left + " " * padding + right
+        stdscr.addstr(height-1, 0, status[:width-1], curses.color_pair(COLOR_STATUSBAR))
+
+def draw_wrapped(stdscr, lines, scroll_top, text_height, offset, width, lang, search_pattern, show_numbers, total_lines):
+    screen_row = 1
+    for li in range(scroll_top, len(lines)):
+        if screen_row >= text_height + 1:
+            break
+        line = lines[li]
+        chunks = wrap_line(line, width, offset)
+        for ci, chunk in enumerate(chunks):
+            if screen_row >= text_height + 1:
+                break
+            x = 0
+            if show_numbers:
+                if ci == 0:
+                    num = str(li + 1).rjust(len(str(total_lines))) + " "
+                else:
+                    num = " " * (len(str(total_lines)) + 1)
+                stdscr.addstr(screen_row, 0, num, curses.color_pair(COLOR_LINENR))
+                x = len(num)
+            highlighted = highlight_line(chunk, lang, search_pattern if search_pattern else None)
+            for text, color in highlighted:
+                if x < width:
+                    stdscr.addstr(screen_row, x, text[:width - x], curses.color_pair(color))
+                    x += len(text)
+            screen_row += 1
+    while screen_row <= text_height:
+        stdscr.addstr(screen_row, 0, "~", curses.color_pair(COLOR_TILDE))
+        screen_row += 1
+
+def get_cursor_screen_row(lines, row, col, offset, width, scroll_top):
+    screen_row = 1
+    text_width = width - offset
+    for li in range(scroll_top, row):
+        chunks = wrap_line(lines[li], width, offset)
+        screen_row += len(chunks)
+    if text_width > 0:
+        char_col = col - offset
+        chunk_idx = max(0, char_col // text_width)
+        screen_row += chunk_idx
+        screen_col = offset + (char_col % text_width)
+    else:
+        screen_col = col
+    return screen_row, screen_col
 
 def main(stdscr):
-    row = 0
-    col = 0
-    scroll_top = 0
-    mode = "normal"
-    show_numbers = True
-    dd_pending = False
-    yy_pending = False
-    command = ""
-    message = ""
-    yank_buffer = ""
-
     curses.use_default_colors()
     curses.start_color()
     apply_theme(stdscr)
     curses.mousemask(curses.ALL_MOUSE_EVENTS)
 
-    filename = sys.argv[1] if len(sys.argv) > 1 else None
+    tab_size     = [4]
+    word_wrap    = [False]
+    show_numbers = True
+    mode         = "normal"
+    command      = ""
+    message      = ""
+    search_pattern = ""
+    search_matches = []
+    search_idx   = 0
+    g_pending    = False
+    z_pending    = False
+    dd_pending   = False
+    yy_pending   = False
+    yank_buffer  = ""
+    branch       = None
+    branch_timer = 0
 
-    if filename and os.path.exists(filename):
-        with open(filename, 'r') as f:
-            lines = f.read().splitlines()
-        if not lines:
-            lines = [""]
+    if len(sys.argv) > 1:
+        buffers = [new_buffer(sys.argv[1])]
     else:
-        lines = [""]
-
-    col = num_offset(len(lines), show_numbers)
+        buffers = [new_buffer()]
+    current_buf = 0
+    branch = get_git_branch(buffers[current_buf]["filename"])
 
     while True:
+        buf         = buffers[current_buf]
+        lines       = buf["lines"]
+        row         = buf["row"]
+        col         = buf["col"]
+        scroll_top  = buf["scroll_top"]
+        scroll_left = buf.get("scroll_left", 0)
+
+        branch_timer += 1
+        if branch_timer >= 100:
+            branch = get_git_branch(buf["filename"])
+            branch_timer = 0
+
         stdscr.clear()
         height, width = stdscr.getmaxyx()
-        lang = detect_language(filename, lines)
+        lang   = detect_language(buf["filename"], lines)
         offset = num_offset(len(lines), show_numbers)
 
-        visible = lines[scroll_top:scroll_top + height - 1]
-        for i, line in enumerate(visible):
-            x = 0
-            if show_numbers:
-                num = str(scroll_top + i + 1).rjust(len(str(len(lines)))) + " "
-                stdscr.addstr(i, 0, num, curses.color_pair(COLOR_LINENR))
-                x = len(num)
-            chunks = highlight_line(line, lang)
-            for text, color in chunks:
-                if x < width:
-                    stdscr.addstr(i, x, text[:width - x], curses.color_pair(color))
-                    x += len(text)
+        col = max(col, offset)
+        buf["col"] = col
 
-        for i in range(len(visible), height - 1):
-            stdscr.addstr(i, 0, "~", curses.color_pair(COLOR_TILDE))
+        draw_tabbar(stdscr, buffers, current_buf, width)
+        text_height = height - 2
+
+        if word_wrap[0]:
+            draw_wrapped(stdscr, lines, scroll_top, text_height, offset, width, lang, search_pattern, show_numbers, len(lines))
+            cursor_screen_row, cursor_screen_col = get_cursor_screen_row(lines, row, col, offset, width, scroll_top)
+            cursor_screen_row = min(cursor_screen_row, text_height)
+        else:
+            visible = lines[scroll_top:scroll_top + text_height]
+            for i, line in enumerate(visible):
+                x = 0
+                if show_numbers:
+                    num = str(scroll_top + i + 1).rjust(len(str(len(lines)))) + " "
+                    stdscr.addstr(i + 1, 0, num, curses.color_pair(COLOR_LINENR))
+                    x = len(num)
+                display_line = line[scroll_left:] if scroll_left < len(line) else ""
+                chunks = highlight_line(display_line, lang, search_pattern if search_pattern else None)
+                for text, color in chunks:
+                    if x < width:
+                        stdscr.addstr(i + 1, x, text[:width - x], curses.color_pair(color))
+                        x += len(text)
+            for i in range(len(visible), text_height):
+                stdscr.addstr(i + 1, 0, "~", curses.color_pair(COLOR_TILDE))
+            cursor_screen_row = row - scroll_top + 1
+            cursor_screen_col = col - scroll_left
 
         if mode == "command":
             stdscr.addstr(height-1, 0, f":{command}    ", curses.color_pair(COLOR_STATUSBAR))
+        elif mode == "search":
+            stdscr.addstr(height-1, 0, f"/{search_pattern}    ", curses.color_pair(COLOR_STATUSBAR))
         else:
-            draw_statusbar(stdscr, height, width, mode, filename, lang, row, col, offset, lines, message)
+            draw_statusbar(stdscr, height, width, mode, buf, lang, col, offset, message, tab_size[0], branch, word_wrap[0])
 
-        stdscr.move(row - scroll_top, col)
+        try:
+            stdscr.move(cursor_screen_row, max(0, cursor_screen_col))
+        except:
+            pass
         stdscr.refresh()
 
         key = stdscr.getch()
         message = ""
 
+        if mode == "search":
+            if key == 27:
+                mode = "normal"
+                search_pattern = ""
+                search_matches = []
+            elif key in (curses.KEY_ENTER, 10, 13):
+                search_matches = get_search_matches(lines, search_pattern)
+                if search_matches:
+                    search_idx = 0
+                    row, col = search_matches[0]
+                    col += offset
+                    buf["row"] = row
+                    buf["col"] = col
+                    buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
+                    message = f"/{search_pattern}  [{search_idx+1}/{len(search_matches)}]"
+                else:
+                    message = f"pattern not found: {search_pattern}"
+                mode = "normal"
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                search_pattern = search_pattern[:-1]
+            elif 32 <= key <= 126:
+                search_pattern += chr(key)
+            continue
+
         if key == curses.KEY_MOUSE:
             try:
                 _, mx, my, _, bstate = curses.getmouse()
                 if bstate & curses.BUTTON1_CLICKED:
-                    new_row = my + scroll_top
-                    if new_row < len(lines):
+                    new_row = my - 1 + scroll_top
+                    if 0 <= new_row < len(lines):
                         row = new_row
-                        col = max(min(mx, len(lines[row]) + offset), offset)
-                        scroll_top = clamp_scroll(row, scroll_top, height)
+                        col = max(min(mx + scroll_left, len(lines[row]) + offset), offset)
+                        buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
                 elif bstate & curses.BUTTON4_PRESSED:
                     row = max(0, row - 3)
                     col = max(min(col, len(lines[row]) + offset), offset)
-                    scroll_top = clamp_scroll(row, scroll_top, height)
+                    buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
                 elif bstate & curses.BUTTON5_PRESSED:
                     row = min(len(lines) - 1, row + 3)
                     col = max(min(col, len(lines[row]) + offset), offset)
-                    scroll_top = clamp_scroll(row, scroll_top, height)
+                    buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
+                elif bstate & (1 << 22):  # horizontal scroll left
+                    if not word_wrap[0]:
+                        buf["scroll_left"] = max(0, scroll_left - 3)
+                elif bstate & (1 << 23):  # horizontal scroll right
+                    if not word_wrap[0]:
+                        max_left = max(0, max(len(l) for l in lines) - (width - offset))
+                        buf["scroll_left"] = min(max_left, scroll_left + 3)
+                buf["row"] = row
+                buf["col"] = col
             except curses.error:
                 pass
+
         elif key == curses.KEY_UP and row > 0:
             row -= 1
             col = max(min(col, len(lines[row]) + offset), offset)
-            scroll_top = clamp_scroll(row, scroll_top, height)
+            buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
+            buf["row"] = row
+            buf["col"] = col
         elif key == curses.KEY_DOWN and row < len(lines) - 1:
             row += 1
             col = max(min(col, len(lines[row]) + offset), offset)
-            scroll_top = clamp_scroll(row, scroll_top, height)
+            buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
+            buf["row"] = row
+            buf["col"] = col
         elif key == curses.KEY_LEFT and col > offset:
             col -= 1
+            if not word_wrap[0] and col < scroll_left + offset:
+                buf["scroll_left"] = max(0, scroll_left - 1)
+            buf["col"] = col
         elif key == curses.KEY_RIGHT and col < len(lines[row]) + offset:
             col += 1
+            if not word_wrap[0] and col - offset >= scroll_left + width - offset:
+                buf["scroll_left"] = scroll_left + 1
+            buf["col"] = col
 
         elif mode == "normal":
             if key == ord(' '):
-                open_theme_menu(stdscr)
+                open_theme_menu(stdscr, tab_size, word_wrap)
+            elif key == ord('/'):
+                mode = "search"
+                search_pattern = ""
+            elif key == ord('n'):
+                if search_matches:
+                    search_idx = (search_idx + 1) % len(search_matches)
+                    row, col = search_matches[search_idx]
+                    col += offset
+                    buf["row"] = row
+                    buf["col"] = col
+                    buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
+                    message = f"/{search_pattern}  [{search_idx+1}/{len(search_matches)}]"
+            elif key == ord('N'):
+                if search_matches:
+                    search_idx = (search_idx - 1) % len(search_matches)
+                    row, col = search_matches[search_idx]
+                    col += offset
+                    buf["row"] = row
+                    buf["col"] = col
+                    buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
+                    message = f"/{search_pattern}  [{search_idx+1}/{len(search_matches)}]"
+            elif key == ord('u'):
+                if buf["undo_stack"]:
+                    buf["redo_stack"].append((list(lines), row, col))
+                    saved_lines, saved_row, saved_col = buf["undo_stack"].pop()
+                    buf["lines"] = saved_lines
+                    buf["row"]   = saved_row
+                    buf["col"]   = saved_col
+                    buf["scroll_top"] = clamp_scroll(saved_row, scroll_top, text_height)
+                    message = "undone"
+                else:
+                    message = "nothing to undo"
+            elif key == 18:  # Ctrl+R
+                if buf["redo_stack"]:
+                    buf["undo_stack"].append((list(lines), row, col))
+                    saved_lines, saved_row, saved_col = buf["redo_stack"].pop()
+                    buf["lines"] = saved_lines
+                    buf["row"]   = saved_row
+                    buf["col"]   = saved_col
+                    buf["scroll_top"] = clamp_scroll(saved_row, scroll_top, text_height)
+                    message = "redone"
+                else:
+                    message = "nothing to redo"
+            elif key == ord('g'):
+                if g_pending:
+                    row = 0
+                    col = offset
+                    buf["row"] = row
+                    buf["col"] = col
+                    buf["scroll_top"] = 0
+                    g_pending = False
+                else:
+                    g_pending = True
+                    z_pending = False
+            elif key == ord('G'):
+                row = len(lines) - 1
+                col = offset
+                buf["row"] = row
+                buf["col"] = col
+                buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
+                g_pending = False
+            elif key == ord('z'):
+                if z_pending:
+                    z_pending = False
+                else:
+                    z_pending = True
+                    g_pending = False
+            elif key == ord('h') and z_pending:
+                # zh — scroll left
+                if not word_wrap[0]:
+                    buf["scroll_left"] = max(0, scroll_left - 5)
+                z_pending = False
+            elif key == ord('l') and z_pending:
+                # zl — scroll right
+                if not word_wrap[0]:
+                    max_left = max(0, max(len(l) for l in lines) - (width - offset))
+                    buf["scroll_left"] = min(max_left, scroll_left + 5)
+                z_pending = False
+            elif key == ord('t') and not z_pending:
+                current_buf = (current_buf + 1) % len(buffers)
+                branch = get_git_branch(buffers[current_buf]["filename"])
+                branch_timer = 0
+                g_pending = False
+            elif key == ord('T') and not z_pending:
+                current_buf = (current_buf - 1) % len(buffers)
+                branch = get_git_branch(buffers[current_buf]["filename"])
+                branch_timer = 0
+                g_pending = False
             elif key == ord('i'):
                 mode = "insert"
                 dd_pending = False
                 yy_pending = False
+                g_pending  = False
+                z_pending  = False
             elif key == ord(':'):
                 mode = "command"
                 command = ""
-            elif key == ord('h'):
+                g_pending = False
+                z_pending = False
+            elif key == ord('h') and not z_pending:
                 if col > offset:
                     col -= 1
-            elif key == ord('l'):
+                    buf["col"] = col
+            elif key == ord('l') and not z_pending:
                 if col < len(lines[row]) + offset:
                     col += 1
+                    buf["col"] = col
             elif key == ord('j'):
                 if row < len(lines) - 1:
                     row += 1
                     col = max(min(col, len(lines[row]) + offset), offset)
-                    scroll_top = clamp_scroll(row, scroll_top, height)
+                    buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
+                    buf["row"] = row
+                    buf["col"] = col
             elif key == ord('k'):
                 if row > 0:
                     row -= 1
                     col = max(min(col, len(lines[row]) + offset), offset)
-                    scroll_top = clamp_scroll(row, scroll_top, height)
+                    buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
+                    buf["row"] = row
+                    buf["col"] = col
             elif key == ord('o'):
+                push_undo(buf)
                 lines.insert(row + 1, "")
                 row += 1
                 col = num_offset(len(lines), show_numbers)
                 mode = "insert"
-                scroll_top = clamp_scroll(row, scroll_top, height)
+                buf["modified"] = True
+                buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
+                buf["row"] = row
+                buf["col"] = col
             elif key == ord('x'):
                 if col - offset < len(lines[row]):
+                    push_undo(buf)
                     lines[row] = lines[row][:col-offset] + lines[row][col-offset+1:]
-            elif key == ord('n'):
-                show_numbers = not show_numbers
-                col = max(col, num_offset(len(lines), show_numbers))
+                    buf["modified"] = True
             elif key == ord('p'):
                 text = yank_buffer if yank_buffer else paste_from_clipboard()
                 if text:
+                    push_undo(buf)
                     paste_lines = text.split('\n')
                     for j, pl in enumerate(paste_lines):
                         lines.insert(row + 1 + j, pl)
                     row += len(paste_lines)
                     col = num_offset(len(lines), show_numbers)
-                    scroll_top = clamp_scroll(row, scroll_top, height)
+                    buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
+                    buf["modified"] = True
+                    buf["row"] = row
+                    buf["col"] = col
                     message = "pasted"
             elif key == ord('P'):
                 text = yank_buffer if yank_buffer else paste_from_clipboard()
                 if text:
+                    push_undo(buf)
                     paste_lines = text.split('\n')
                     for j, pl in enumerate(paste_lines):
                         lines.insert(row + j, pl)
                     col = num_offset(len(lines), show_numbers)
-                    scroll_top = clamp_scroll(row, scroll_top, height)
+                    buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
+                    buf["modified"] = True
+                    buf["col"] = col
                     message = "pasted above"
             elif key == ord('d'):
                 if dd_pending:
+                    push_undo(buf)
                     if len(lines) > 1:
                         lines.pop(row)
                         if row >= len(lines):
                             row -= 1
                     else:
-                        lines = [""]
+                        buf["lines"] = [""]
                     col = num_offset(len(lines), show_numbers)
-                    scroll_top = clamp_scroll(row, scroll_top, height)
+                    buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
+                    buf["modified"] = True
+                    buf["row"] = row
+                    buf["col"] = col
                     dd_pending = False
                 else:
                     dd_pending = True
@@ -630,8 +995,12 @@ def main(stdscr):
                     yy_pending = True
                     dd_pending = False
             elif key == 27:
-                dd_pending = False
-                yy_pending = False
+                dd_pending     = False
+                yy_pending     = False
+                g_pending      = False
+                z_pending      = False
+                search_pattern = ""
+                search_matches = []
 
         elif mode == "insert":
             if key == 27:
@@ -639,31 +1008,53 @@ def main(stdscr):
                 dd_pending = False
                 yy_pending = False
             elif key == 9:
-                tab = "    "
+                push_undo(buf)
+                tab = " " * tab_size[0]
                 lines[row] = lines[row][:col-offset] + tab + lines[row][col-offset:]
-                col += 4
+                col += tab_size[0]
+                buf["modified"] = True
+                buf["col"] = col
             elif key in (curses.KEY_BACKSPACE, 127, 8):
+                push_undo(buf)
                 if col > offset:
                     lines[row] = lines[row][:col-offset-1] + lines[row][col-offset:]
                     col -= 1
+                    buf["modified"] = True
+                    buf["col"] = col
                 elif row > 0:
                     prev_offset = num_offset(len(lines), show_numbers)
                     col = len(lines[row - 1]) + prev_offset
                     lines[row - 1] = lines[row - 1] + lines[row]
                     lines.pop(row)
                     row -= 1
-                    scroll_top = clamp_scroll(row, scroll_top, height)
+                    buf["modified"] = True
+                    buf["row"] = row
+                    buf["col"] = col
+                    buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
             elif key in (curses.KEY_ENTER, 10, 13):
+                push_undo(buf)
                 indent = get_auto_indent(lines[row], lang)
                 new_line = lines[row][col-offset:]
                 lines[row] = lines[row][:col-offset]
                 lines.insert(row + 1, indent + new_line)
                 row += 1
                 col = num_offset(len(lines), show_numbers) + len(indent)
-                scroll_top = clamp_scroll(row, scroll_top, height)
+                buf["modified"] = True
+                buf["row"] = row
+                buf["col"] = col
+                buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
             elif 32 <= key <= 126:
-                lines[row] = lines[row][:col-offset] + chr(key) + lines[row][col-offset:]
-                col += 1
+                push_undo(buf)
+                ch = chr(key)
+                if ch in PAIRS:
+                    closing = PAIRS[ch]
+                    lines[row] = lines[row][:col-offset] + ch + closing + lines[row][col-offset:]
+                    col += 1
+                else:
+                    lines[row] = lines[row][:col-offset] + ch + lines[row][col-offset:]
+                    col += 1
+                buf["modified"] = True
+                buf["col"] = col
 
         elif mode == "command":
             if key == 27:
@@ -671,19 +1062,75 @@ def main(stdscr):
                 command = ""
             elif key in (curses.KEY_ENTER, 10, 13):
                 if command == "w":
-                    if save(lines, filename):
-                        message = f"saved to {filename}"
+                    if save(lines, buf["filename"]):
+                        buf["modified"] = False
+                        branch = get_git_branch(buf["filename"])
+                        message = f"saved to {buf['filename']}"
                     else:
                         message = "no filename!"
                 elif command == "q":
-                    break
+                    if buf["modified"]:
+                        message = "unsaved changes! use :q! to force or :wq to save"
+                    elif len(buffers) > 1:
+                        buffers.pop(current_buf)
+                        current_buf = min(current_buf, len(buffers) - 1)
+                        branch = get_git_branch(buffers[current_buf]["filename"])
+                    else:
+                        break
+                elif command == "q!":
+                    if len(buffers) > 1:
+                        buffers.pop(current_buf)
+                        current_buf = min(current_buf, len(buffers) - 1)
+                        branch = get_git_branch(buffers[current_buf]["filename"])
+                    else:
+                        break
                 elif command == "wq":
-                    save(lines, filename)
-                    break
+                    save(lines, buf["filename"])
+                    buf["modified"] = False
+                    if len(buffers) > 1:
+                        buffers.pop(current_buf)
+                        current_buf = min(current_buf, len(buffers) - 1)
+                        branch = get_git_branch(buffers[current_buf]["filename"])
+                    else:
+                        break
                 elif command.startswith("w "):
-                    filename = command[2:]
-                    save(lines, filename)
-                    message = f"saved to {filename}"
+                    buf["filename"] = command[2:]
+                    save(lines, buf["filename"])
+                    buf["modified"] = False
+                    branch = get_git_branch(buf["filename"])
+                    message = f"saved to {buf['filename']}"
+                elif command == "tabnew":
+                    buffers.append(new_buffer())
+                    current_buf = len(buffers) - 1
+                    branch = get_git_branch(buffers[current_buf]["filename"])
+                elif command.startswith("tabnew "):
+                    fname = command[7:]
+                    buffers.append(new_buffer(fname))
+                    current_buf = len(buffers) - 1
+                    branch = get_git_branch(buffers[current_buf]["filename"])
+                elif command.startswith("goto "):
+                    try:
+                        n = int(command[5:]) - 1
+                        row = max(0, min(n, len(lines) - 1))
+                        col = num_offset(len(lines), show_numbers)
+                        buf["row"] = row
+                        buf["col"] = col
+                        buf["scroll_top"] = clamp_scroll(row, scroll_top, text_height)
+                    except ValueError:
+                        message = "invalid line number"
+                elif command.startswith("set tabsize "):
+                    try:
+                        tab_size[0] = max(1, int(command[12:]))
+                        message = f"tab size set to {tab_size[0]}"
+                    except ValueError:
+                        message = "invalid tab size"
+                elif command == "set wrap":
+                    word_wrap[0] = True
+                    message = "word wrap ON"
+                elif command == "set nowrap":
+                    word_wrap[0] = False
+                    buf["scroll_left"] = 0
+                    message = "word wrap OFF"
                 mode = "normal"
                 command = ""
             elif key in (curses.KEY_BACKSPACE, 127, 8):
