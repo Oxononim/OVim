@@ -349,7 +349,7 @@ HELP_LINES = [
     "  :set autocaps/noautocaps  auto-capitalize after '. '",
     "",
     "  ── GIT ────────────────────────────────────────────────",
-    "  :gl  :gs  :gd  :ga  :gaa  :gun",
+    "  :gl :gs :gd  :ga  :gaa  :gun",
     "  :gc  :gca  :gp  :gpl  :gf",
     "  :gb  :gbd  :gsw  :gst  :gstp",
     "",
